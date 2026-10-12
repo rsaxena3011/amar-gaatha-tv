@@ -96,7 +96,7 @@ export const amarGaathaCards = (festival: string | null = null): CardData[] => {
     headerImage: item.poster,
     movie: item.video_url,
     duration: item.duration_sec,
-    category: 'Amar Gaatha',
+    category: 'Kids Devotion',
     genres: item.festival_tags,
     releaseYear: 2026,
     rating: 5,

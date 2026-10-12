@@ -12,7 +12,7 @@ import {
 } from "../../data/pauseAndAsk";
 
 /**
- * Pause & Ask overlay panel (Amar Gaatha TV, C024).
+ * Pause & Ask overlay panel (Kids Devotion TV, C024).
  * Shown while paused: up to 3 authored questions for the current
  * scene. Selecting one shows the answer card with its source
  * badge. No free generation: unanswered territory stays silent

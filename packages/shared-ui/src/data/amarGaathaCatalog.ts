@@ -1,4 +1,4 @@
-// Amar Gaatha TV catalog - owned content (C024).
+// Kids Devotion TV catalog - owned content (C024).
 // Generated from project/data/catalog_v2.json (Kids Devotionn
 // top-3 videos, scenes verified against 4K masters).
 import type { CatalogItemWithScenes } from './pauseAndAsk';

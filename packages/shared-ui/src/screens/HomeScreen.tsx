@@ -193,7 +193,7 @@ export default function HomeScreen() {
       <View style={gridStyles.container}>
         {renderHeader()}
         <SpatialNavigationScrollView offsetFromStart={scaledPixels(60)} style={gridStyles.scrollContent}>
-          {renderScrollableRow('For Sharad Purnima: Amar Gaatha', trendingRef, amarGaathaCards('sharad-purnima'))}
+          {renderScrollableRow('For Sharad Purnima: Kids Devotion', trendingRef, amarGaathaCards('sharad-purnima'))}
           {renderScrollableRow('Trending Movies', trendingRef)}
           {renderScrollableRow('Classics', classicsRef)}
           {renderScrollableRow('Hip and Modern', hipAndModernRef)}

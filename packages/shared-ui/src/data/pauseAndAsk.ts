@@ -1,5 +1,5 @@
 /**
- * Pause & Ask engine - Amar Gaatha TV (C024)
+ * Pause & Ask engine - Kids Devotion TV (C024)
  * Pure logic, no UI deps. Given a catalog + playback position,
  * returns the questions for the current scene and answers with
  * source badges, at kid/adult level, in English or Hindi.
