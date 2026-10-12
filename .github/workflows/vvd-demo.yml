@@ -1,0 +1,131 @@
+name: VVD Demo Capture
+# Captures the C024 demo video: headless Vega Virtual Device on a GitHub
+# Actions runner (/dev/kvm verified present), Xvfb + ffmpeg x11grab,
+# scripted D-pad input via vda. Manual trigger only.
+#
+# PREREQ: the Vega SDK 0.24.12112 tarball must exist as split release
+# assets under the SDK release tag (see competitions/c024-amazon/
+# SDK_DELIVERY_RUNBOOK.md). Until then this workflow fails fast at the
+# "Fetch Vega SDK" step with the exact missing piece named.
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_release_tag:
+        description: "Release tag holding the vega-sdk part-* assets"
+        required: false
+        default: "vega-sdk-0.24.12112"
+
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: KVM gate (fail fast)
+        run: |
+          ls -l /dev/kvm || { echo "NO /dev/kvm on this runner"; exit 1; }
+          kvm-ok || true
+
+      - name: System deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl > /dev/null 2>&1
+          gh --version || true
+
+      - name: Fetch Vega SDK
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.sdk_release_tag }}"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || { echo "MISSING: release '$TAG' with vega-sdk part-* assets does not exist."; \
+                 echo "Follow competitions/c024-amazon/SDK_DELIVERY_RUNBOOK.md, then re-dispatch."; exit 1; }
+          mkdir -p /tmp/sdkdl "$HOME/vega-sdk"
+          gh release download "$TAG" -p 'vega-sdk-part-*' -D /tmp/sdkdl
+          cat /tmp/sdkdl/vega-sdk-part-* > /tmp/vega-sdk.tar.xz
+          tar -xJf /tmp/vega-sdk.tar.xz -C "$HOME/vega-sdk"
+          export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
+          vega --version
+          ls "$HOME/vega-sdk/0.24.12112/bin" | head
+
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Boot VVD
+        run: |
+          export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
+          export DISPLAY=:99
+          vega virtual-device start > /tmp/vvd-start.log 2>&1 &
+          echo "Waiting for VVD to register as a device (up to 15 min)..."
+          for i in $(seq 1 90); do
+            OUT=$(vega device list 2>&1 || true)
+            echo "$OUT" | grep -vi "no devices" | grep -E "[0-9A-Za-z]" && { echo "DEVICE-UP after ${i}x10s"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
+            sleep 10
+          done
+          cat /tmp/vvd-devices.txt 2>/dev/null || { echo "VVD never registered:"; cat /tmp/vvd-start.log; exit 1; }
+
+      - name: Start ffmpeg capture
+        run: |
+          nohup ffmpeg -y -f x11grab -video_size 1920x1080 -framerate 30 -i :99 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast /tmp/demo_take1.mp4 \
+            > /tmp/ffmpeg.log 2>&1 &
+          echo $! > /tmp/ffmpeg.pid
+          sleep 2
+          kill -0 "$(cat /tmp/ffmpeg.pid)" && echo "ffmpeg recording"
+
+      - name: Install + launch app, scripted D-pad choreography
+        run: |
+          export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
+          export DISPLAY=:99
+          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | head -1)
+          [ -n "$SERIAL" ] || SERIAL=VirtualDevice
+          echo "Using device id: $SERIAL"
+          # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
+          vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
+          sleep 12   # home screen render: "For Sharad Purnima: Kids Devotion" row, first card focused
+          # Open first card (Achyutam Keshavam)
+          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_CENTER
+          sleep 6    # player load
+          # Pause -> Pause & Ask panel with chips appears
+          vda -s "$SERIAL" shell input keyevent KEYCODE_MEDIA_PAUSE
+          sleep 4    # hold on the paused panel
+          # Open first question chip, hold on answer card
+          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_DOWN
+          sleep 1
+          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_CENTER
+          sleep 5    # answer card visible
+          # Back to panel, resume playback
+          vda -s "$SERIAL" shell input keyevent KEYCODE_BACK
+          sleep 1
+          vda -s "$SERIAL" shell input keyevent KEYCODE_MEDIA_PLAY
+          sleep 5    # playing tail
+          echo "CHOREOGRAPHY-DONE"
+
+      - name: Stop capture
+        if: always()
+        run: |
+          kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
+          sleep 3
+          ls -la /tmp/demo_take1.mp4 || true
+          ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 /tmp/demo_take1.mp4 || true
+
+      - name: Upload demo take
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vvd-demo-take1
+          path: /tmp/demo_take1.mp4
+          if-no-files-found: error
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vvd-demo-logs
+          path: |
+            /tmp/vvd-start.log
+            /tmp/ffmpeg.log
+            /tmp/vvd-devices.txt
