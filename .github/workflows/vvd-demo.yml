@@ -78,7 +78,14 @@ jobs:
             # grep as "device found" and faked a green boot in run
             # 38397839099).
             if echo "$OUT" | grep -qi "traceback"; then echo "vega crashed:"; echo "$OUT"; exit 1; fi
-            echo "$OUT" | grep -vi "no devices" | grep -E "[0-9A-Za-z]+" >/dev/null && { echo "DEVICE-UP after ${i}x10s"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
+            # DEVICE-UP needs a serial-shaped token, not just any alnum
+            # line: banner lines ("List of devices attached", "daemon
+            # started ...") must never fake a green boot (guard,
+            # 2026-10-13).
+            SERIAL=$(echo "$OUT" | grep -viE "no devices|list of devices|daemon|traceback" \
+              | grep -Eo '[A-Za-z0-9._:-]{4,}' \
+              | grep -viE '^(list|of|devices|attached|daemon|started|vega|device)$' | head -1)
+            [ -n "$SERIAL" ] && { echo "DEVICE-UP after ${i}x10s (serial: $SERIAL)"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
             sleep 10
           done
           cat /tmp/vvd-devices.txt 2>/dev/null || { echo "VVD never registered:"; cat /tmp/vvd-start.log; exit 1; }
@@ -97,7 +104,7 @@ jobs:
         run: |
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           export DISPLAY=:99
-          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | grep -vi "traceback" | head -1)
+          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | grep -viE "traceback|^(list|of|devices|attached|daemon|started|vega|device)$" | head -1)
           [ -n "$SERIAL" ] || { echo "no usable device id in vvd-devices.txt:"; cat /tmp/vvd-devices.txt; exit 1; }
           echo "Using device id: $SERIAL"
           # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
