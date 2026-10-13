@@ -46,6 +46,10 @@ jobs:
           gh release download "$TAG" -p 'vega-sdk-part-*' -D /tmp/sdkdl
           cat /tmp/sdkdl/vega-sdk-part-* > /tmp/vega-sdk.tar.xz
           tar -xJf /tmp/vega-sdk.tar.xz -C "$HOME/vega-sdk"
+          # The no-workspace SDK tarball ships no workspace/ tree; vega's
+          # import-time setup_packagelink_in_workspace symlinks the repo into
+          # workspace/App, so the parent must exist before vega --version.
+          mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           vega --version
           ls "$HOME/vega-sdk/0.24.12112/bin" | head
