@@ -46,10 +46,19 @@ jobs:
           gh release download "$TAG" -p 'vega-sdk-part-*' -D /tmp/sdkdl
           cat /tmp/sdkdl/vega-sdk-part-* > /tmp/vega-sdk.tar.xz
           tar -xJf /tmp/vega-sdk.tar.xz -C "$HOME/vega-sdk"
-          # The no-workspace SDK tarball ships no workspace/ tree; vega's
-          # import-time setup_packagelink_in_workspace symlinks the repo into
-          # workspace/App, so the parent must exist before vega --version.
+          # The no-workspace SDK tarball ships no workspace/ tree at all, but
+          # vega's import chain needs two things under it before vega
+          # --version can run: (1) setup_packagelink_in_workspace symlinks
+          # the repo into workspace/App, so the parent must exist; (2)
+          # config.py's Dependencies init opens workspace/App/Config
+          # (SKIP_LOCAL_CONFIG makes get_config_path return workspace/App
+          # itself) and writes workspace/App/dependencies.pkl. The Config is
+          # installer-shipped (vendored from the PC install as
+          # demos/vega-workspace-App-Config); the tarball --exclude dropped
+          # it along with the stale state (run 38466298288 died here).
           mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
+          cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" \
+             "$HOME/vega-sdk/0.24.12112/workspace/App/Config"
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           vega --version
           ls "$HOME/vega-sdk/0.24.12112/bin" | head
@@ -65,15 +74,19 @@ jobs:
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           export DISPLAY=:99
           # dutyfree-vega's config.py calls os.makedirs(workspace/env) with no
-          # exist_ok: the SDK tarball carries a stale workspace/env from the
-          # PC-side attempts, which crashes the boot. BUT setup_packagelink_in
-          # workspace ALSO needs workspace/App to exist as the symlink parent
-          # (rm -rf on the whole workspace broke every vega command at
-          # import in run 38397839099). So: clear the stale env AND any stale
-          # App link, then recreate the App parent; the CLI links fresh.
-          rm -rf "$HOME/vega-sdk/0.24.12112/workspace/env" \
-                 "$HOME/vega-sdk/0.24.12112/workspace/App"
+          # exist_ok: the old SDK tarball carried a stale workspace/env from
+          # the PC-side attempts, which crashed the boot. With the
+          # no-workspace tarball, env is created fresh on first use, but the
+          # step still clears it defensively. workspace/App is KEPT: Fetch
+          # restored the installer-shipped Config there (plus
+          # dependencies.pkl and the repo symlink); only stale broken
+          # symlinks are dropped. (rm -rf on the whole App dir broke every
+          # vega command at import in run 38397839099.)
+          rm -rf "$HOME/vega-sdk/0.24.12112/workspace/env"
+          find "$HOME/vega-sdk/0.24.12112/workspace/App" -maxdepth 1 -xtype l -delete 2>/dev/null || true
           mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
+          cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" \
+             "$HOME/vega-sdk/0.24.12112/workspace/App/Config"
           vega virtual-device start > /tmp/vvd-start.log 2>&1 &
           echo "Waiting for VVD to register as a device (up to 15 min)..."
           for i in $(seq 1 90); do

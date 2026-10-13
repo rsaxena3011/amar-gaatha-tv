@@ -1,0 +1,47 @@
+package.KeplerSDKApp = {
+    interfaces = (1.0);
+
+    build-system = vega;
+    build-tools = {
+        1.0 = {
+            KeplerCLI = 2.0;
+            Vodka = 1.2;
+            VegaPackagingTool = 1.0;
+            KeplerCLIVegaDeviceAdaptor = 2.0;
+            VegaManifestModuleRemapper = 1.0;
+            KeplerCLIDebuggingTools = 2.0;
+            KeplerPerfCLI = 2.0;
+            KeplerCLIKVDI = 2.0;
+            KeplerCLIHeaptrack = 1.0;
+            KeplerCLISimpleperf = 1.0;
+            KeplerLiveTvTools = 1.0;
+            VodkaClangArmv7 = 1.2;
+            VodkaClangAarch64 = 1.2;
+            VodkaClangX86_64 = 1.2;
+            VodkaSysrootLibcppArmv7 = 1.0;
+            VodkaSysrootLibcppAarch64 = 1.0;
+            VodkaSysrootLibcppX86_64 = 1.0;
+            VodkaClangHost = 1.2;
+            VodkaCMake = 3.25.x;
+            VodkaNinja = 1.x;
+            VodkaPkg-config = 0.29;
+        };
+    };
+    dependencies = {
+        1.0 = {
+            # buildtime dependencies
+            KeplerSDK3pIndependentPackages = 1.0;
+            VegaUIReact-TurboModuleAPI = 1.x_vodka_libcpp;
+            APMF2 = 2.0;
+            Patchelf = 0.x;
+            VegaUIReact-Hermes = 0.72.x_vodka;
+            KeplerCLITelemetryService = 1.0;
+            KeplerCLIKeplerDebug = 1.0;
+        };
+    };
+    runtime-dependencies = {
+        1.0 = {
+            # runtime dependencies
+        };
+    };
+};
