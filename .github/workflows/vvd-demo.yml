@@ -34,6 +34,8 @@ jobs:
           gh --version || true
 
       - name: Fetch Vega SDK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           TAG="${{ github.event.inputs.sdk_release_tag }}"
