@@ -62,17 +62,27 @@ jobs:
           export DISPLAY=:99
           # dutyfree-vega's config.py calls os.makedirs(workspace/env) with no
           # exist_ok: the SDK tarball carries a stale workspace/env from the
-          # PC-side attempts, which crashes the boot. Wipe it so the runtime
-          # environment rebuilds from scratch.
-          rm -rf "$HOME/vega-sdk/0.24.12112/workspace"
+          # PC-side attempts, which crashes the boot. BUT setup_packagelink_in
+          # workspace ALSO needs workspace/App to exist as the symlink parent
+          # (rm -rf on the whole workspace broke every vega command at
+          # import in run 38397839099). So: clear the stale env AND any stale
+          # App link, then recreate the App parent; the CLI links fresh.
+          rm -rf "$HOME/vega-sdk/0.24.12112/workspace/env" \
+                 "$HOME/vega-sdk/0.24.12112/workspace/App"
+          mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
           vega virtual-device start > /tmp/vvd-start.log 2>&1 &
           echo "Waiting for VVD to register as a device (up to 15 min)..."
           for i in $(seq 1 90); do
             OUT=$(vega device list 2>&1 || true)
-            echo "$OUT" | grep -vi "no devices" | grep -E "[0-9A-Za-z]" && { echo "DEVICE-UP after ${i}x10s"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
+            # Fail loudly on a CLI crash (a Traceback once passed the old
+            # grep as "device found" and faked a green boot in run
+            # 38397839099).
+            if echo "$OUT" | grep -qi "traceback"; then echo "vega crashed:"; echo "$OUT"; exit 1; fi
+            echo "$OUT" | grep -vi "no devices" | grep -E "[0-9A-Za-z]+" >/dev/null && { echo "DEVICE-UP after ${i}x10s"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
             sleep 10
           done
           cat /tmp/vvd-devices.txt 2>/dev/null || { echo "VVD never registered:"; cat /tmp/vvd-start.log; exit 1; }
+          grep -qi "traceback" /tmp/vvd-devices.txt && { echo "bogus device file:"; cat /tmp/vvd-devices.txt; exit 1; } || true
 
       - name: Start ffmpeg capture
         run: |
@@ -87,8 +97,8 @@ jobs:
         run: |
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           export DISPLAY=:99
-          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | head -1)
-          [ -n "$SERIAL" ] || SERIAL=VirtualDevice
+          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | grep -vi "traceback" | head -1)
+          [ -n "$SERIAL" ] || { echo "no usable device id in vvd-devices.txt:"; cat /tmp/vvd-devices.txt; exit 1; }
           echo "Using device id: $SERIAL"
           # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
           vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
