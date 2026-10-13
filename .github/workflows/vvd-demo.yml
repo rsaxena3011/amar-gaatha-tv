@@ -78,13 +78,26 @@ jobs:
             # grep as "device found" and faked a green boot in run
             # 38397839099).
             if echo "$OUT" | grep -qi "traceback"; then echo "vega crashed:"; echo "$OUT"; exit 1; fi
-            # DEVICE-UP needs a serial-shaped token, not just any alnum
-            # line: banner lines ("List of devices attached", "daemon
-            # started ...") must never fake a green boot (guard,
-            # 2026-10-13).
-            SERIAL=$(echo "$OUT" | grep -viE "no devices|list of devices|daemon|traceback" \
-              | grep -Eo '[A-Za-z0-9._:-]{4,}' \
-              | grep -viE '^(list|of|devices|attached|daemon|started|vega|device)$' | head -1)
+            # DEVICE-UP parsing (hardened 2026-10-14): banner lines must
+            # never fake a device serial. Tier 1 accepts only adb-shaped
+            # "<serial> <state>" lines; tier 2 accepts bare serial-shaped
+            # tokens but rejects banner vocabulary, traceback words and
+            # version-like tokens (e.g. "v0.24.12112" from a CLI banner).
+            parse_serial() {
+              local out="$1" serial
+              serial=$(printf '%s\n' "$out" | grep -viE 'traceback' \
+                | grep -Ei '^[[:space:]]*[A-Za-z0-9._:-]{4,}[[:space:]]+(device|offline|unauthorized|bootloader|recovery)[[:space:]]*$' \
+                | sed -E 's/^[[:space:]]*([A-Za-z0-9._:-]{4,}).*/\1/' | head -1)
+              if [ -z "$serial" ]; then
+                serial=$(printf '%s\n' "$out" \
+                  | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
+                  | grep -Eo '[A-Za-z0-9._:-]{4,}' \
+                  | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
+                  | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
+              fi
+              printf '%s' "$serial"
+            }
+            SERIAL=$(parse_serial "$OUT")
             [ -n "$SERIAL" ] && { echo "DEVICE-UP after ${i}x10s (serial: $SERIAL)"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
             sleep 10
           done
@@ -104,7 +117,23 @@ jobs:
         run: |
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           export DISPLAY=:99
-          SERIAL=$(grep -Eo '[0-9A-Za-z._:-]{4,}' /tmp/vvd-devices.txt | grep -viE "traceback|^(list|of|devices|attached|daemon|started|vega|device)$" | head -1)
+          # Same hardened serial parsing as the Boot VVD step: banner
+          # lines must never fake a device serial.
+          parse_serial() {
+            local out="$1" serial
+            serial=$(printf '%s\n' "$out" | grep -viE 'traceback' \
+              | grep -Ei '^[[:space:]]*[A-Za-z0-9._:-]{4,}[[:space:]]+(device|offline|unauthorized|bootloader|recovery)[[:space:]]*$' \
+              | sed -E 's/^[[:space:]]*([A-Za-z0-9._:-]{4,}).*/\1/' | head -1)
+            if [ -z "$serial" ]; then
+              serial=$(printf '%s\n' "$out" \
+                | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
+                | grep -Eo '[A-Za-z0-9._:-]{4,}' \
+                | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
+                | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
+            fi
+            printf '%s' "$serial"
+          }
+          SERIAL=$(parse_serial "$(cat /tmp/vvd-devices.txt)")
           [ -n "$SERIAL" ] || { echo "no usable device id in vvd-devices.txt:"; cat /tmp/vvd-devices.txt; exit 1; }
           echo "Using device id: $SERIAL"
           # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
