@@ -60,6 +60,11 @@ jobs:
         run: |
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           export DISPLAY=:99
+          # dutyfree-vega's config.py calls os.makedirs(workspace/env) with no
+          # exist_ok: the SDK tarball carries a stale workspace/env from the
+          # PC-side attempts, which crashes the boot. Wipe it so the runtime
+          # environment rebuilds from scratch.
+          rm -rf "$HOME/vega-sdk/0.24.12112/workspace"
           vega virtual-device start > /tmp/vvd-start.log 2>&1 &
           echo "Waiting for VVD to register as a device (up to 15 min)..."
           for i in $(seq 1 90); do
