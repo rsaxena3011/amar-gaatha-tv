@@ -46,6 +46,16 @@ jobs:
           gh release download "$TAG" -p 'vega-sdk-part-*' -D /tmp/sdkdl
           cat /tmp/sdkdl/vega-sdk-part-* > /tmp/vega-sdk.tar.xz
           tar -xJf /tmp/vega-sdk.tar.xz -C "$HOME/vega-sdk"
+          # Run 38621748159 died at boot: the tarball ships the PC's stale
+          # vvd/instances/<uuid>/ state (hardware-qemu.ini, metadata) with
+          # the PC install root /root/vega/sdk baked in. The Go
+          # virtualdevice binary reuses that stale instance and fork/exec's
+          # the emulator at the PC path; on the runner /root is not
+          # traversable, so the launch dies with "permission denied" before
+          # any device boots. Drop the stale instance state so
+          # `virtual-device start` creates a fresh instance with
+          # runner-local paths.
+          rm -rf "$HOME/vega-sdk/0.24.12112/vvd/instances"
           # Run 38582760175 died at boot: the tarball lost the VVD
           # emulator's +x bit in transit ("Failed to launch:
           # fork/exec .../vvd/images/tv/vmtools/agent/emulator:
@@ -97,6 +107,14 @@ jobs:
           mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
           cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" \
              "$HOME/vega-sdk/0.24.12112/workspace/App/Config"
+          # Run 38621748159 lesson: NEVER run two vega invocations
+          # concurrently. config.py's create_symlink_farm has a TOCTOU
+          # (exists-check then os.symlink with no exist_ok): the background
+          # `virtual-device start` and the first wait-loop `vega device
+          # list` raced it and the poll died with FileExistsError on a
+          # Vodka symlink. Pre-build the farm SEQUENTIALLY here so the
+          # background start and every later poll see it and skip creation.
+          vega --version >/dev/null 2>&1
           vega virtual-device start > /tmp/vvd-start.log 2>&1 &
           echo "Waiting for VVD to register as a device (up to 15 min)..."
           for i in $(seq 1 90); do
