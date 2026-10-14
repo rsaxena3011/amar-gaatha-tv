@@ -46,6 +46,16 @@ jobs:
           gh release download "$TAG" -p 'vega-sdk-part-*' -D /tmp/sdkdl
           cat /tmp/sdkdl/vega-sdk-part-* > /tmp/vega-sdk.tar.xz
           tar -xJf /tmp/vega-sdk.tar.xz -C "$HOME/vega-sdk"
+          # Run 38582760175 died at boot: the tarball lost the VVD
+          # emulator's +x bit in transit ("Failed to launch:
+          # fork/exec .../vvd/images/tv/vmtools/agent/emulator:
+          # permission denied") while bin/ CLIs kept theirs. Restore
+          # execute bits on the emulator and its qemu helpers after
+          # extraction; without this the VVD can never boot.
+          SDKROOT="$HOME/vega-sdk/0.24.12112"
+          chmod +x "$SDKROOT/vvd/images/tv/vmtools/agent/emulator" 2>/dev/null || true
+          find "$SDKROOT/vvd" -type f \( -name 'emulator*' -o -name 'qemu*' \) \
+            -exec chmod +x {} + 2>/dev/null || true
           # The no-workspace SDK tarball ships no workspace/ tree at all, but
           # vega's import chain needs two things under it before vega
           # --version can run: (1) setup_packagelink_in_workspace symlinks
@@ -100,6 +110,11 @@ jobs:
             # "<serial> <state>" lines; tier 2 accepts bare serial-shaped
             # tokens but rejects banner vocabulary, traceback words and
             # version-like tokens (e.g. "v0.24.12112" from a CLI banner).
+            # Run 38582760175 lesson: a crashed "vega device list" prints
+            # "VegaSDK Error: ERROR: ..." and tier 2 grabbed "VegaSDK" as
+            # the serial, faking DEVICE-UP a third time. vegasdk/sdk/error
+            # are now in the reject list in BOTH parse copies (Boot and
+            # choreography).
             parse_serial() {
               local out="$1" serial
               serial=$(printf '%s\n' "$out" | grep -viE 'traceback' \
@@ -109,7 +124,7 @@ jobs:
                 serial=$(printf '%s\n' "$out" \
                   | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
                   | grep -Eo '[A-Za-z0-9._:-]{4,}' \
-                  | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
+                  | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|vegasdk|sdk|error|errors|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
                   | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
               fi
               printf '%s' "$serial"
@@ -145,7 +160,7 @@ jobs:
               serial=$(printf '%s\n' "$out" \
                 | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
                 | grep -Eo '[A-Za-z0-9._:-]{4,}' \
-                | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
+                | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|vegasdk|sdk|error|errors|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
                 | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
             fi
             printf '%s' "$serial"
