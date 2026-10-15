@@ -79,6 +79,21 @@ jobs:
           mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
           cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" \
              "$HOME/vega-sdk/0.24.12112/workspace/App/Config"
+          # Run 38716808541 died at boot: the Boot step's background
+          # `vega virtual-device start` and the first `vega device list`
+          # poll race into config.py's create_symlink_farm (every vega
+          # invocation rebuilds the farm at import); the loser's
+          # exists-check-then-os.symlink dies with FileExistsError
+          # (TOCTOU on the kepler-notices link), and a sibling interleave
+          # can fake the "not pure symlink farm" exit(1). The patch script
+          # converts every leaf create in config.py to create-first-then-
+          # verify (EAFP); both racers build the identical farm, so the
+          # race is harmless (verified: 10 threads x 30 iters, 0 crashes,
+          # farms identical, single-process semantics preserved).
+          # Runner-local only; the PC SDK and the release tarball are
+          # untouched. Must run BEFORE the first vega invocation below.
+          python3 "$GITHUB_WORKSPACE/demos/sdk_toctou_patch.py" \
+            "$HOME/vega-sdk/0.24.12112/tools/bin/config.py"
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           vega --version
           ls "$HOME/vega-sdk/0.24.12112/bin" | head
