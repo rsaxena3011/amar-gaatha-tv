@@ -130,7 +130,14 @@ jobs:
           # Vodka symlink. Pre-build the farm SEQUENTIALLY here so the
           # background start and every later poll see it and skip creation.
           vega --version >/dev/null 2>&1
-          vega virtual-device start > /tmp/vvd-start.log 2>&1 &
+          # Run 38722681803 root cause: `vega virtual-device start` has its
+          # OWN internal boot deadline (Go binary --timeout-sec, default 60s,
+          # forwarded from the Node CLI's --timeout/-t/--timeoutSeconds
+          # option). Cold boot on a fresh runner exceeds 60s, so the SDK
+          # abandoned the emulator while it was still coming up; our 15-min
+          # wait loop then polled a guest the SDK had already given up on.
+          # 900s matches our own wait loop (90 x 10s).
+          vega virtual-device start --timeout 900 > /tmp/vvd-start.log 2>&1 &
           echo "Waiting for VVD to register as a device (up to 15 min)..."
           for i in $(seq 1 90); do
             OUT=$(vega device list 2>&1 || true)
