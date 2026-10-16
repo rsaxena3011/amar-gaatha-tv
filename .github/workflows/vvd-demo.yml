@@ -401,14 +401,40 @@ jobs:
           # sequence started while it was still loading, so the Pause & Ask
           # moment never landed on camera. Give it a full minute, then
           # confirm the guest is actually showing something before keys.
+          # Run 14: blind keys are unreliable on nested virt (the app is
+          # slow; a key can land before the screen settles). After each
+          # navigation key, wait up to 30s for the screenshot to actually
+          # change; if it never changes, try the key once more before
+          # giving up on the step.
+          key_wait_change() {  # $1=key $2=shot-name $3=prev-shot-path
+            key "$1" || return 1
+            local i
+            for i in 1 2 3 4 5 6; do
+              sleep 5
+              shot "$2"
+              if ! cmp -s "/tmp/vvd-logs/shot-$2.png" "$3"; then
+                log "  screen changed after $1 (waited $((i*5))s)"
+                return 0
+              fi
+            done
+            log "  screen did NOT change after $1 (30s)"
+            return 1
+          }
           log "settle 60s for app first paint"
           sleep 60; shot app-settled
-          sleep 12; shot home      # Home: first card focused (DefaultFocus row)
-          key KEY_ENTER;     sleep 6; shot detail   # open first card -> Details screen
-          key KEY_ENTER;     sleep 8; shot player   # Watch now (DefaultFocus) -> Player, video autoplays
-          key KEY_PLAYPAUSE; sleep 4; shot paused   # Pause -> Pause & Ask panel
-          key KEY_DOWN;      sleep 1
-          key KEY_ENTER;     sleep 8; shot answer   # question chip -> answer card (take ends here)
+          sleep 12; shot home      # Home: drawer open, first card row visible
+          # Home -> Details: ENTER (if the drawer stole focus, this closes
+          # it; retry once if the screen never changes).
+          key_wait_change KEY_ENTER detail /tmp/vvd-logs/shot-home.png \
+            || key_wait_change KEY_ENTER detail-retry /tmp/vvd-logs/shot-detail.png \
+            || { echo "never reached Details"; exit 1; }
+          # Details -> Player: Watch now has DefaultFocus.
+          key_wait_change KEY_ENTER player /tmp/vvd-logs/shot-detail.png \
+            || key_wait_change KEY_ENTER player-retry /tmp/vvd-logs/shot-player.png \
+            || { echo "never reached Player"; exit 1; }
+          key KEY_PLAYPAUSE; sleep 8; shot paused   # Pause -> Pause & Ask panel
+          key KEY_DOWN;      sleep 2
+          key KEY_ENTER;     sleep 10; shot answer   # question chip -> answer card (take ends here)
           echo "CHOREOGRAPHY-DONE"
 
       - name: Stop capture
