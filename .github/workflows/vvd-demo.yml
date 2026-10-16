@@ -397,6 +397,12 @@ jobs:
             log "RAW FALLBACK install+launch SUCCEEDED"
           fi
 
+          # Run 12: the app takes 30s+ to paint after install; the key
+          # sequence started while it was still loading, so the Pause & Ask
+          # moment never landed on camera. Give it a full minute, then
+          # confirm the guest is actually showing something before keys.
+          log "settle 60s for app first paint"
+          sleep 60; shot app-settled
           sleep 12; shot home      # "For Sharad Purnima: Kids Devotion" row, first card focused
           key KEY_ENTER;     sleep 6; shot player   # open first card (Achyutam Keshavam)
           key KEY_PLAYPAUSE; sleep 4; shot paused   # Pause -> Pause & Ask panel
