@@ -212,7 +212,13 @@ jobs:
           #    --vda-port is the emulator's device-side port (5555, serial
           #    emulator-5554), not the vda server port, and the Node CLI does
           #    not forward it anyway.
-          ( vega virtual-device start --timeout 900 --no-gl-accel 2>&1; echo "LAUNCHER-EXIT rc=$?" ) \
+          #    Do NOT pass --no-gl-accel: it maps to the emulator's -gpu off,
+          #    which disables ALL guest rendering (runs 9+10: black guest
+          #    screen, demo video would be a black rectangle). The runner has
+          #    no GPU, so the AVD's own hw.gpu.mode=swiftshader_indirect
+          #    (CPU rendering) is what we want; omitting the flag lets the
+          #    emulator honor its config.
+          ( vega virtual-device start --timeout 900 2>&1; echo "LAUNCHER-EXIT rc=$?" ) \
             | while IFS= read -r l || [ -n "$l" ]; do printf '%s %s\n' "$(date -u +%T)" "$l"; done > /tmp/vvd-start.log &
 
           # 3) Wait on vda directly (never `vega device list`: it runs an
@@ -314,16 +320,19 @@ jobs:
               if [ "$i" -lt 3 ]; then sleep 20; fi
             done
             shot preinstall-gate
-            local yavg
-            yavg=$(ffmpeg -hide_banner -i /tmp/vvd-logs/shot-preinstall-gate.png \
-              -vf signalstats -f null - 2>&1 | grep -o 'YAVG:[0-9.]*' | head -1 | cut -d: -f2)
-            [ -n "$yavg" ] || { log "  could not read screen luminance (ffmpeg parse)"; return 1; }
-            log "  guest screen mean luminance YAVG=$yavg"
-            # A fully-black frame (guest UI never rendered; the nested-
-            # virtualization popup alone does not lift the mean) shows
-            # YAVG ~ 0. The Vega home screen is far brighter.
-            awk "BEGIN{exit !(0 + $yavg < 3.0)}" \
-              && { log "  SCREEN IS BLACK: guest UI never rendered"; return 1; }
+            # Guest screen is the emulator window's child at 962x540+100+100
+            # (run 10 x11-tree.txt). A black guest crops to ~20KB PNG; a
+            # rendered TV UI is far larger. (ffmpeg signalstats prints no
+            # per-frame stats on modern ffmpeg, so no text parsing; PNG byte
+            # size of the guest-region crop is the signal.)
+            local crop_bytes
+            ffmpeg -loglevel error -y -i /tmp/vvd-logs/shot-preinstall-gate.png \
+              -vf "crop=962:540:100:100" -frames:v 1 /tmp/vvd-logs/guest-crop.png \
+              || { log "  guest crop failed"; return 1; }
+            crop_bytes=$(wc -c < /tmp/vvd-logs/guest-crop.png | tr -d ' ')
+            log "  guest-region crop PNG bytes=$crop_bytes"
+            [ "$crop_bytes" -gt 60000 ] \
+              || { log "  SCREEN IS BLACK: guest UI never rendered"; return 1; }
             log "pre-install gate PASSED"
           }
 
