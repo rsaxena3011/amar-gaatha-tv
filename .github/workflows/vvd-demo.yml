@@ -18,7 +18,9 @@ on:
 jobs:
   demo:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Worst case with the dispatch-#9 retry path: fetch ~4 + boot 30 +
+    # choreography 45 (3 install attempts + raw fallback) + capture ~4.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -267,7 +269,15 @@ jobs:
           kill -0 "$(cat /tmp/ffmpeg.pid)" && echo "ffmpeg recording"
 
       - name: Install + launch app, scripted remote choreography
-        timeout-minutes: 10
+        # Dispatch #9 (run 38901912099, 2026-10-16): the boot readiness gate
+        # (uname + hardware-name) passed on a partially-initialized guest
+        # (black screen, nested-virtualization warning, flapping vdad
+        # transport). `vega run-app` then died in its GET_DEVICE_INFO
+        # discovery chain ("No permission for operation", exit 254) and the
+        # transport went offline. The install phase now: (1) gates on a
+        # settled guest, (2) retries 3x with transport recycle, (3) falls
+        # back to raw vda primitives that bypass the Node CLI discovery.
+        timeout-minutes: 45
         run: |
           . /tmp/vvd-lib.sh
           export DISPLAY=:99
@@ -288,9 +298,84 @@ jobs:
             out=$(timeout -k 5 20 vda -s "$SERIAL" shell inputd-cli button_press "$1" 2>&1) || { log "  failed: $out"; return 1; }
             if printf '%s' "$out" | grep -qi 'did not match'; then log "  rejected: $out"; return 1; fi
           }
-          # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
-          timeout -k 10 300 vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" \
-            com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
+
+          # --- FIX #1 (dispatch #9 post-mortem): gate the install on a
+          # settled guest: 3 consecutive shell probes over ~60s plus a
+          # non-black guest screen pixel check. A guest whose UI never
+          # rendered fails fast here (with the evidence screenshot) instead
+          # of burning the install and killing the transport.
+          preinstall_gate() {
+            log "pre-install gate: 3 consecutive shell probes (~60s)"
+            local i
+            for i in 1 2 3; do
+              timeout -k 5 20 vda -s "$SERIAL" shell true >/dev/null 2>&1 \
+                || { log "  probe $i/3 FAILED"; return 1; }
+              log "  probe $i/3 ok"
+              if [ "$i" -lt 3 ]; then sleep 20; fi
+            done
+            shot preinstall-gate
+            local yavg
+            yavg=$(ffmpeg -hide_banner -i /tmp/vvd-logs/shot-preinstall-gate.png \
+              -vf signalstats -f null - 2>&1 | grep -o 'YAVG:[0-9.]*' | head -1 | cut -d: -f2)
+            [ -n "$yavg" ] || { log "  could not read screen luminance (ffmpeg parse)"; return 1; }
+            log "  guest screen mean luminance YAVG=$yavg"
+            # A fully-black frame (guest UI never rendered; the nested-
+            # virtualization popup alone does not lift the mean) shows
+            # YAVG ~ 0. The Vega home screen is far brighter.
+            awk "BEGIN{exit !(0 + $yavg < 3.0)}" \
+              && { log "  SCREEN IS BLACK: guest UI never rendered"; return 1; }
+            log "pre-install gate PASSED"
+          }
+
+          # --- FIX #2 (dispatch #9 post-mortem): 3 install attempts with
+          # backoff; recycle the vda transport between attempts (in #9 the
+          # transport went offline after the failed install and never came
+          # back on its own).
+          try_install_cli() {
+            timeout -k 10 300 vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" \
+              com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
+          }
+          recycle_vda() {
+            log "recycling vda transport"
+            vda kill-server >/dev/null 2>&1 || true
+            sleep 5
+            timeout -k 5 30 vda start-server >/dev/null 2>&1 || true
+            sleep 10
+          }
+          preinstall_gate || { echo "PRE-INSTALL GATE FAILED: guest never settled (see shot-preinstall-gate.png in the logs artifact)"; exit 1; }
+          install_ok=0
+          attempt=0
+          while [ "$attempt" -lt 3 ]; do
+            attempt=$((attempt + 1))
+            log "== install attempt $attempt/3 (Node CLI path)"
+            rc=0
+            try_install_cli || rc=$?
+            if [ "$rc" -eq 0 ]; then log "install SUCCEEDED via Node CLI"; install_ok=1; break; fi
+            log "install attempt $attempt FAILED (rc=$rc)"
+            recycle_vda
+            vvd_wait_ready 300 || { echo "device did not come back after transport recycle"; exit 1; }
+            preinstall_gate || { echo "pre-install gate failed on retry $attempt"; exit 1; }
+            sleep 10
+          done
+
+          # --- FIX #3 (dispatch #9 post-mortem): if the Node CLI path fails
+          # all 3 attempts, bypass its GET_DEVICE_INFO discovery chain (the
+          # exit-254 "No permission for operation" failure in #9) with raw
+          # vda primitives: push + guest-side vpm install, then launch via
+          # vmsgr (primitives from the merged 5-model review).
+          if [ "$install_ok" -ne 1 ]; then
+            log "Node CLI path failed 3x; trying RAW fallback"
+            timeout -k 10 300 vda -s "$SERIAL" push "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" /data/local/tmp/take1.vpkg \
+              || { echo "raw fallback: vda push failed"; exit 1; }
+            log "push ok; guest vpm install"
+            timeout -k 5 300 vda -s "$SERIAL" shell vpm install /data/local/tmp/take1.vpkg \
+              || { echo "raw fallback: vpm install failed"; exit 1; }
+            log "vpm install ok; launching via vmsgr"
+            timeout -k 5 60 vda -s "$SERIAL" shell vmsgr send pkg://com.saxenawave.kidsdevotion.main \
+              || { echo "raw fallback: vmsgr launch failed"; exit 1; }
+            log "RAW FALLBACK install+launch SUCCEEDED"
+          fi
+
           sleep 12; shot home      # "For Sharad Purnima: Kids Devotion" row, first card focused
           key KEY_ENTER;     sleep 6; shot player   # open first card (Achyutam Keshavam)
           key KEY_PLAYPAUSE; sleep 4; shot paused   # Pause -> Pause & Ask panel
