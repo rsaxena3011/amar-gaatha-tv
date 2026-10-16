@@ -114,8 +114,13 @@ jobs:
           # a fresh instance it shells out to helpers (qemu-img, mkscard,
           # vda, crashpad_handler) to build userdata.qcow2/cache.ext4, and a
           # missing +x there fails silently mid-boot.
+          # NOTE (dispatch #8, 2026-10-16): -d '\n' is REQUIRED. The
+          # no-workspace tarball ships filenames with spaces
+          # (e.g. "... (dev).tmpl"); bare xargs splits them on whitespace,
+          # chmod exits 123 on the phantom tokens, and set -e kills the
+          # step before VVD ever boots. GNU xargs supports -d.
           find "$SDKROOT" -type f -exec file {} + 2>/dev/null | \
-            grep -E 'ELF|executable|script' | cut -d: -f1 | xargs -r chmod +x
+            grep -E 'ELF|executable|script' | cut -d: -f1 | xargs -r -d '\n' chmod +x
           # Make the REAL vda (SDK's KeplerCLIVegaDeviceAdaptor dispatcher ->
           # x86_64-Linux/bin/vda, the same binary vega uses) and vega visible
           # to every later step. $SDK/bin alone has no vda, so the old
