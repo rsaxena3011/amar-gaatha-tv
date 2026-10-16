@@ -47,7 +47,15 @@ jobs:
           sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl x11-utils > /dev/null 2>&1
           gh --version || true
 
+      - name: Cache Vega SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/vega-sdk
+          key: vega-sdk-${{ github.event.inputs.sdk_release_tag }}
+
       - name: Fetch Vega SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
