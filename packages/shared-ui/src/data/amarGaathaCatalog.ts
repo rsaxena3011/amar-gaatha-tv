@@ -10,7 +10,7 @@ export const amarGaathaCatalog: CatalogItemWithScenes[] = [
     "title_hi": "Achyutam Keshavam: Baccho ke liye Krishna Bhajan",
     "type": "bhajan",
     "duration_sec": 386,
-    "video_url": "OWNED-CONTENT-URL/achyutam-keshavam.mp4",
+    "video_url": "https://github.com/rsaxena3011/amar-gaatha-tv/releases/download/c024-videos/achyutam-keshavam.mp4",
     "poster": "achyutam.jpg",
     "age_band": "kids",
     "festival_tags": [
