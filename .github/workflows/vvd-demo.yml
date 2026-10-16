@@ -1,7 +1,7 @@
 name: VVD Demo Capture
 # Captures the C024 demo video: headless Vega Virtual Device on a GitHub
 # Actions runner (/dev/kvm verified present), Xvfb + ffmpeg x11grab,
-# scripted D-pad input via vda. Manual trigger only.
+# scripted remote input via inputd-cli over vda. Manual trigger only.
 #
 # PREREQ: the Vega SDK 0.24.12112 tarball must exist as split release
 # assets under the SDK release tag (see competitions/c024-amazon/
@@ -13,24 +13,36 @@ on:
       sdk_release_tag:
         description: "Release tag holding the vega-sdk part-* assets"
         required: false
-        default: "vega-sdk-0.24.12112"
+        default: "vega-sdk-0.24.12112-noworkspace"
 
 jobs:
   demo:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: KVM gate (fail fast)
         run: |
           ls -l /dev/kvm || { echo "NO /dev/kvm on this runner"; exit 1; }
-          kvm-ok || true
+          # Standard GitHub-runner recipe: make /dev/kvm usable by the runner
+          # user (the emulator hard-fails "x86_64 emulation currently requires
+          # hardware acceleration!" without it; it never falls back to TCG).
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle
+          ls -l /dev/kvm
+          # /dev/kvm existing is not enough: prove the runner user can
+          # actually use the KVM API, or the emulator boots degraded and
+          # VDA can never connect ("ready" but invisible).
+          python3 -c 'import os,fcntl; fd=os.open("/dev/kvm",os.O_RDWR); v=fcntl.ioctl(fd,0xAE00); print("KVM API version",v); assert v>=12'
 
       - name: System deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl > /dev/null 2>&1
+          sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl x11-utils > /dev/null 2>&1
           gh --version || true
 
       - name: Fetch Vega SDK
@@ -97,6 +109,21 @@ jobs:
           export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
           vega --version
           ls "$HOME/vega-sdk/0.24.12112/bin" | head
+          # Restore +x on ALL ELF binaries and shebang scripts in the SDK
+          # tree. The tarball transit can strip exec bits; when vvd creates
+          # a fresh instance it shells out to helpers (qemu-img, mkscard,
+          # vda, crashpad_handler) to build userdata.qcow2/cache.ext4, and a
+          # missing +x there fails silently mid-boot.
+          find "$SDKROOT" -type f -exec file {} + 2>/dev/null | \
+            grep -E 'ELF|executable|script' | cut -d: -f1 | xargs -r chmod +x
+          # Make the REAL vda (SDK's KeplerCLIVegaDeviceAdaptor dispatcher ->
+          # x86_64-Linux/bin/vda, the same binary vega uses) and vega visible
+          # to every later step. $SDK/bin alone has no vda, so the old
+          # choreography's bare `vda ...` was "command not found".
+          VDA_DIR=$(dirname "$(ls "$SDKROOT"/packages/KeplerCLIVegaDeviceAdaptor/*/AL2_x86_64/DEV.STD.PTHREAD/build/bin/vda | head -1)")
+          "$VDA_DIR/vda" version
+          echo "$SDKROOT/bin" >> "$GITHUB_PATH"
+          echo "$VDA_DIR" >> "$GITHUB_PATH"
 
       - name: Start Xvfb
         run: |
@@ -105,137 +132,200 @@ jobs:
           echo "DISPLAY=:99" >> "$GITHUB_ENV"
 
       - name: Boot VVD
+        timeout-minutes: 30
         run: |
-          export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
+          SDK="$HOME/vega-sdk/0.24.12112"
           export DISPLAY=:99
+          mkdir -p /tmp/vvd-logs
           # dutyfree-vega's config.py calls os.makedirs(workspace/env) with no
-          # exist_ok: the old SDK tarball carried a stale workspace/env from
-          # the PC-side attempts, which crashed the boot. With the
-          # no-workspace tarball, env is created fresh on first use, but the
-          # step still clears it defensively. workspace/App is KEPT: Fetch
-          # restored the installer-shipped Config there (plus
-          # dependencies.pkl and the repo symlink); only stale broken
-          # symlinks are dropped. (rm -rf on the whole App dir broke every
-          # vega command at import in run 38397839099.)
-          rm -rf "$HOME/vega-sdk/0.24.12112/workspace/env"
-          find "$HOME/vega-sdk/0.24.12112/workspace/App" -maxdepth 1 -xtype l -delete 2>/dev/null || true
-          mkdir -p "$HOME/vega-sdk/0.24.12112/workspace/App"
-          cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" \
-             "$HOME/vega-sdk/0.24.12112/workspace/App/Config"
-          # Run 38621748159 lesson: NEVER run two vega invocations
-          # concurrently. config.py's create_symlink_farm has a TOCTOU
-          # (exists-check then os.symlink with no exist_ok): the background
-          # `virtual-device start` and the first wait-loop `vega device
-          # list` raced it and the poll died with FileExistsError on a
-          # Vodka symlink. Pre-build the farm SEQUENTIALLY here so the
-          # background start and every later poll see it and skip creation.
-          vega --version >/dev/null 2>&1
-          # Run 38722681803 root cause: `vega virtual-device start` has its
-          # OWN internal boot deadline (Go binary --timeout-sec, default 60s,
-          # forwarded from the Node CLI's --timeout/-t/--timeoutSeconds
-          # option). Cold boot on a fresh runner exceeds 60s, so the SDK
-          # abandoned the emulator while it was still coming up; our 15-min
-          # wait loop then polled a guest the SDK had already given up on.
-          # 900s matches our own wait loop (90 x 10s).
-          vega virtual-device start --timeout 900 > /tmp/vvd-start.log 2>&1 &
-          echo "Waiting for VVD to register as a device (up to 15 min)..."
-          for i in $(seq 1 90); do
-            OUT=$(vega device list 2>&1 || true)
-            # Fail loudly on a CLI crash (a Traceback once passed the old
-            # grep as "device found" and faked a green boot in run
-            # 38397839099).
-            if echo "$OUT" | grep -qi "traceback"; then echo "vega crashed:"; echo "$OUT"; exit 1; fi
-            # DEVICE-UP parsing (hardened 2026-10-14): banner lines must
-            # never fake a device serial. Tier 1 accepts only adb-shaped
-            # "<serial> <state>" lines; tier 2 accepts bare serial-shaped
-            # tokens but rejects banner vocabulary, traceback words and
-            # version-like tokens (e.g. "v0.24.12112" from a CLI banner).
-            # Run 38582760175 lesson: a crashed "vega device list" prints
-            # "VegaSDK Error: ERROR: ..." and tier 2 grabbed "VegaSDK" as
-            # the serial, faking DEVICE-UP a third time. vegasdk/sdk/error
-            # are now in the reject list in BOTH parse copies (Boot and
-            # choreography).
-            parse_serial() {
-              local out="$1" serial
-              serial=$(printf '%s\n' "$out" | grep -viE 'traceback' \
-                | grep -Ei '^[[:space:]]*[A-Za-z0-9._:-]{4,}[[:space:]]+(device|offline|unauthorized|bootloader|recovery)[[:space:]]*$' \
-                | sed -E 's/^[[:space:]]*([A-Za-z0-9._:-]{4,}).*/\1/' | head -1)
-              if [ -z "$serial" ]; then
-                serial=$(printf '%s\n' "$out" \
-                  | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
-                  | grep -Eo '[A-Za-z0-9._:-]{4,}' \
-                  | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|vegasdk|sdk|error|errors|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
-                  | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
+          # exist_ok: clear env defensively; KEEP workspace/App (Config +
+          # dependencies.pkl + repo symlink), only drop stale broken symlinks.
+          # (rm -rf on the whole App dir broke every vega command at import in
+          # run 38397839099.)
+          rm -rf "$SDK/workspace/env"
+          find "$SDK/workspace/App" -maxdepth 1 -xtype l -delete 2>/dev/null || true
+          mkdir -p "$SDK/workspace/App"
+          cp "$GITHUB_WORKSPACE/demos/vega-workspace-App-Config" "$SDK/workspace/App/Config"
+
+          # Helpers shared with later steps (sourced again there).
+          cat > /tmp/vvd-lib.sh <<'LIB'
+          ts()  { date -u +%H:%M:%S; }
+          log() { printf '[%s] %s\n' "$(ts)" "$*" | tee -a /tmp/vvd-logs/boot-poll.log; }
+          # Readiness = the SDK Go launcher's own checkShell contract
+          # (`uname -a` says amazon AND hardware-name is vvrp), but every call
+          # is time-boxed: vda/adb shell has no timeout of its own.
+          vvd_probe() {
+            local un hw
+            un=$(timeout -k 5 20 vda -s "$1" shell uname -a 2>&1) || { log "  uname rc!=0: $un"; return 1; }
+            hw=$(timeout -k 5 20 vda -s "$1" shell vdcm get com.amazon.devconf/system/device-info/hardware-name 2>&1) || { log "  vdcm rc!=0: $hw"; return 1; }
+            log "  uname: $un | hw: $hw"
+            printf '%s' "$un" | grep -qi amazon && printf '%s' "$hw" | grep -qi vvrp
+          }
+          # Wall-clock deadline (not an iteration count); logs every poll.
+          vvd_wait_ready() {
+            local budget=$1 deadline=$(( $(date +%s) + $1 )) i=0 devs state
+            while :; do
+              i=$((i+1))
+              devs=$(timeout -k 5 15 vda devices 2>&1) || true
+              SERIAL=$(printf '%s\n' "$devs" | awk '$1 ~ /^emulator-[0-9]+$/ {print $1; exit}')
+              state=$(printf '%s\n' "$devs" | awk '$1 ~ /^emulator-[0-9]+$/ {print $2; exit}')
+              log "poll #$i: $(printf '%s' "$devs" | tail -n +2 | tr '\t\n' ' ;')"
+              if [ -n "$SERIAL" ] && [ "$state" = device ] && vvd_probe "$SERIAL"; then
+                log "READY $SERIAL (poll #$i)"; return 0
               fi
-              printf '%s' "$serial"
-            }
-            SERIAL=$(parse_serial "$OUT")
-            [ -n "$SERIAL" ] && { echo "DEVICE-UP after ${i}x10s (serial: $SERIAL)"; echo "$OUT" > /tmp/vvd-devices.txt; break; }
-            sleep 10
-          done
-          cat /tmp/vvd-devices.txt 2>/dev/null || { echo "VVD never registered:"; cat /tmp/vvd-start.log; exit 1; }
-          grep -qi "traceback" /tmp/vvd-devices.txt && { echo "bogus device file:"; cat /tmp/vvd-devices.txt; exit 1; } || true
+              if [ "$state" = offline ] && [ $((i % 6)) -eq 0 ]; then
+                log "  offline for a while -> vda reconnect offline"
+                timeout -k 5 15 vda reconnect offline > /dev/null 2>&1 || true
+              fi
+              [ "$state" = unauthorized ] && log "  unauthorized: ~/.android/adbkey.pub did not reach the guest"
+              # The SDK launcher kills the emulator when its own budget expires.
+              if grep -q 'LAUNCHER-EXIT' /tmp/vvd-start.log 2>/dev/null \
+                 && ! grep -q 'Virtual device ready' /tmp/vvd-start.log; then
+                log "launcher exited without 'Virtual device ready'"; return 1
+              fi
+              [ "$(date +%s)" -ge "$deadline" ] && { log "NOT READY after ${budget}s"; return 1; }
+              sleep 10
+            done
+          }
+          LIB
+          . /tmp/vvd-lib.sh
+
+          # 1) Sequential pre-launch: the first `vega device list` builds the
+          #    symlink farm (`vega --version` exits before
+          #    setup_runtime_environment and never built it), and one
+          #    persistent vda server on tcp:5037 is started, generating
+          #    ~/.android/adbkey BEFORE the emulator pushes adbkey.pub.
+          timeout -k 5 180 vega device list > /tmp/vvd-logs/prelaunch-device-list.txt 2>&1 || true
+          timeout -k 5 30 vda start-server 2>&1 | tee -a /tmp/vvd-logs/boot-poll.log || true
+          ls -l ~/.android/ 2>&1 | tee -a /tmp/vvd-logs/boot-poll.log || true
+
+          # 2) Launch. Keep the SDK's own boot budget (run 38722681803 fix);
+          #    timestamp every line and record the exit (the Node wrapper
+          #    swallows the Go launcher's status). Do NOT pass --vda-port=5037:
+          #    --vda-port is the emulator's device-side port (5555, serial
+          #    emulator-5554), not the vda server port, and the Node CLI does
+          #    not forward it anyway.
+          ( vega virtual-device start --timeout 900 --no-gl-accel 2>&1; echo "LAUNCHER-EXIT rc=$?" ) \
+            | while IFS= read -r l || [ -n "$l" ]; do printf '%s %s\n' "$(date -u +%T)" "$l"; done > /tmp/vvd-start.log &
+
+          # 3) Wait on vda directly (never `vega device list`: it runs an
+          #    un-time-boxed per-device shell chain; run 7 froze inside it).
+          if ! vvd_wait_ready 1080; then
+            echo "VVD never became ready:"; cat /tmp/vvd-start.log; exit 1
+          fi
+          ffmpeg -loglevel error -y -f x11grab -video_size 1920x1080 -i :99 -frames:v 1 /tmp/vvd-logs/shot-boot-ready.png || true
+
+          # 4) Evidence for the run-7 question (never gates the job): one raw,
+          #    time-boxed `vega device list`, plus each piece of its
+          #    GET_DEVICE_INFO chain run separately with rc + duration.
+          {
+            echo "== vda devices -l"; timeout -k 5 15 vda devices -l
+            echo "== raw vega device list"; s=$(date +%s)
+            timeout -k 5 90 vega device list; echo "rc=$? after $(( $(date +%s) - s ))s"
+            echo "== GET_DEVICE_INFO pieces"
+            for c in "vdcm get com.amazon.devconf/system/device-info/device-type-id" "uname -m" \
+                     "vdcm get com.amazon.devconf/system/device-info/profile" "uname -n" \
+                     "vsm developer-mode" "vdcm get com.amazon.devconf/system/device-info/product-name" \
+                     "vdcm get com.amazon.devconf/system/device-info/build-desc" "whoami"; do
+              s=$(date +%s); o=$(timeout -k 5 30 vda -s "$SERIAL" shell "$c" 2>&1); r=$?
+              echo "[$c] rc=$r $(( $(date +%s) - s ))s :: $o"
+            done
+          } > /tmp/vvd-logs/device-diag.txt 2>&1 || true
+
+          # 5) inputd-cli button_press needs developer mode on VVD (default
+          #    shell only exposes get_* commands); enabling it reboots the VVD.
+          dm=$(timeout -k 5 30 vda -s "$SERIAL" shell vsm developer-mode 2>&1) || true
+          log "developer-mode: $dm"
+          if ! printf '%s' "$dm" | grep -q enable; then
+            timeout -k 5 60 vda -s "$SERIAL" shell vsm developer-mode enable 2>&1 | tee -a /tmp/vvd-logs/boot-poll.log || true
+            for _ in $(seq 1 18); do   # wait (<=3 min) for the reboot to drop the transport
+              timeout -k 5 15 vda -s "$SERIAL" shell true > /dev/null 2>&1 || break
+              sleep 10
+            done
+            vvd_wait_ready 600 || { echo "VVD did not come back after developer-mode enable"; exit 1; }
+            sleep 20   # let the launcher/home UI settle after the reboot
+          fi
+          timeout -k 5 30 vda -s "$SERIAL" shell inputd-cli --help 2>&1 | tee /tmp/vvd-logs/inputd-help.txt || true
+          grep -q button_press /tmp/vvd-logs/inputd-help.txt || { echo "inputd-cli button_press unavailable"; exit 1; }
+
+          { echo "$SERIAL"; timeout -k 5 15 vda devices -l; } > /tmp/vvd-devices.txt 2>&1 || true
+          echo "SERIAL=$SERIAL" >> "$GITHUB_ENV"
 
       - name: Start ffmpeg capture
         run: |
-          nohup ffmpeg -y -f x11grab -video_size 1920x1080 -framerate 30 -i :99 \
-            -c:v libx264 -pix_fmt yuv420p -preset ultrafast /tmp/demo_take1.mp4 \
-            > /tmp/ffmpeg.log 2>&1 &
+          # Fragmented MP4 stays playable even if ffmpeg is killed; no cursor.
+          nohup ffmpeg -y -f x11grab -draw_mouse 0 -video_size 1920x1080 -framerate 30 -i :99 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -movflags +frag_keyframe+empty_moov \
+            /tmp/demo_take1.mp4 > /tmp/ffmpeg.log 2>&1 &
           echo $! > /tmp/ffmpeg.pid
           sleep 2
           kill -0 "$(cat /tmp/ffmpeg.pid)" && echo "ffmpeg recording"
 
-      - name: Install + launch app, scripted D-pad choreography
+      - name: Install + launch app, scripted remote choreography
+        timeout-minutes: 10
         run: |
-          export PATH="$HOME/vega-sdk/0.24.12112/bin:$PATH"
+          . /tmp/vvd-lib.sh
           export DISPLAY=:99
-          # Same hardened serial parsing as the Boot VVD step: banner
-          # lines must never fake a device serial.
-          parse_serial() {
-            local out="$1" serial
-            serial=$(printf '%s\n' "$out" | grep -viE 'traceback' \
-              | grep -Ei '^[[:space:]]*[A-Za-z0-9._:-]{4,}[[:space:]]+(device|offline|unauthorized|bootloader|recovery)[[:space:]]*$' \
-              | sed -E 's/^[[:space:]]*([A-Za-z0-9._:-]{4,}).*/\1/' | head -1)
-            if [ -z "$serial" ]; then
-              serial=$(printf '%s\n' "$out" \
-                | grep -viE '^[[:space:]]*(list of devices attached|no devices.*)[[:space:]]*$|daemon|traceback' \
-                | grep -Eo '[A-Za-z0-9._:-]{4,}' \
-                | grep -viE '^(list|of|devices|attached|daemon|started|starting|now|tcp|vega|vegasdk|sdk|error|errors|device|adb|server|version|cli|file|line|most|recent|call|last)$' \
-                | grep -viE '^v?[0-9]+\.[0-9.]+$' | head -1)
-            fi
-            printf '%s' "$serial"
-          }
-          SERIAL=$(parse_serial "$(cat /tmp/vvd-devices.txt)")
-          [ -n "$SERIAL" ] || { echo "no usable device id in vvd-devices.txt:"; cat /tmp/vvd-devices.txt; exit 1; }
+          [ -n "${SERIAL:-}" ] || { echo "no SERIAL exported by Boot VVD"; exit 1; }
           echo "Using device id: $SERIAL"
+          shot() { ffmpeg -loglevel error -y -f x11grab -video_size 1920x1080 -i :99 -frames:v 1 "/tmp/vvd-logs/shot-$1.png" || true; }
+          # Vega OS has no Android `input keyevent`; remote keys go through
+          # inputd-cli with Linux key codes (KEY_ENTER = Select, KEY_DOWN,
+          # KEY_PLAYPAUSE = the app's SupportedKeys.PlayPause toggle).
+          # NOTE: KEY_BACK is deliberately NOT pressed. Verified in
+          # PlayerScreen.vega.tsx: SupportedKeys.Back and hardwareBackPress
+          # both route to navigateBack(), which destroys the video elements
+          # and calls navigation.goBack(). Back does not dismiss the answer
+          # card; it kills the player. The take ends on the answer card.
+          key() {
+            local out
+            log "key $1"
+            out=$(timeout -k 5 20 vda -s "$SERIAL" shell inputd-cli button_press "$1" 2>&1) || { log "  failed: $out"; return 1; }
+            if printf '%s' "$out" | grep -qi 'did not match'; then log "  rejected: $out"; return 1; fi
+          }
           # Install + launch Kids Devotion TV (package com.saxenawave.kidsdevotion)
-          vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
-          sleep 12   # home screen render: "For Sharad Purnima: Kids Devotion" row, first card focused
-          # Open first card (Achyutam Keshavam)
-          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_CENTER
-          sleep 6    # player load
-          # Pause -> Pause & Ask panel with chips appears
-          vda -s "$SERIAL" shell input keyevent KEYCODE_MEDIA_PAUSE
-          sleep 4    # hold on the paused panel
-          # Open first question chip, hold on answer card
-          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_DOWN
-          sleep 1
-          vda -s "$SERIAL" shell input keyevent KEYCODE_DPAD_CENTER
-          sleep 5    # answer card visible
-          # Back to panel, resume playback
-          vda -s "$SERIAL" shell input keyevent KEYCODE_BACK
-          sleep 1
-          vda -s "$SERIAL" shell input keyevent KEYCODE_MEDIA_PLAY
-          sleep 5    # playing tail
+          timeout -k 10 300 vega run-app "$GITHUB_WORKSPACE/demos/vega_x86_64.vpkg" \
+            com.saxenawave.kidsdevotion.main --deviceId "$SERIAL"
+          sleep 12; shot home      # "For Sharad Purnima: Kids Devotion" row, first card focused
+          key KEY_ENTER;     sleep 6; shot player   # open first card (Achyutam Keshavam)
+          key KEY_PLAYPAUSE; sleep 4; shot paused   # Pause -> Pause & Ask panel
+          key KEY_DOWN;      sleep 1
+          key KEY_ENTER;     sleep 8; shot answer   # first question chip -> answer card (take ends here)
           echo "CHOREOGRAPHY-DONE"
 
       - name: Stop capture
         if: always()
         run: |
-          kill -INT "$(cat /tmp/ffmpeg.pid)" 2>/dev/null || true
-          sleep 3
+          PID=$(cat /tmp/ffmpeg.pid 2>/dev/null || true)
+          if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            kill -INT "$PID" || true
+            # wait for ffmpeg to finalize instead of a fixed sleep
+            timeout 60 tail --pid="$PID" -f /dev/null || kill -9 "$PID" || true
+          fi
           ls -la /tmp/demo_take1.mp4 || true
           ffprobe -v error -show_entries format=duration,size -of default=noprint_wrappers=1 /tmp/demo_take1.mp4 || true
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          set +e
+          SDK="$HOME/vega-sdk/0.24.12112"; D=/tmp/vvd-logs; mkdir -p "$D"
+          { date -u; uptime; nproc; free -m; df -h /; \
+            ps -eo pid,ppid,etimes,pcpu,pmem,stat,args --sort=-pcpu | head -40; } > "$D/host.txt" 2>&1
+          timeout -k 5 15 vda devices -l > "$D/vda-devices-final.txt" 2>&1
+          cp "$SDK"/logs/*.log "$D/" 2>/dev/null                    # CLI logs (silly level, every RUN: line)
+          cp "$SDK/vvd/virtual_device.log" "$D/" 2>/dev/null        # Go launcher log (--log-path default)
+          ( cd "$SDK/vvd" && find instances -maxdepth 2 -type f -size -5M \
+              ! -name '*.qcow2' ! -name '*.img' -print0 | xargs -0 -r cp --parents -t "$D" ) 2>/dev/null
+          cp /tmp/vda.*.log "$D/" 2>/dev/null                       # vda server log
+          "$SDK/vvd/images/tv/vmtools/agent/emulator-check" accel > "$D/emulator-check-accel.txt" 2>&1
+          DISPLAY=:99 xwininfo -root -tree > "$D/x11-tree.txt" 2>&1
+          ffmpeg -loglevel error -y -f x11grab -video_size 1920x1080 -i :99 -frames:v 1 "$D/shot-final.png"
+          if [ -n "${SERIAL:-}" ]; then
+            timeout -k 5 30 vda -s "$SERIAL" shell gwsi-tool-screenshooter /tmp/vvd-shot.png \
+              && timeout -k 5 30 vda -s "$SERIAL" pull /tmp/vvd-shot.png "$D/shot-guest.png"
+          fi
+          true
 
       - name: Upload demo take
         if: always()
@@ -243,7 +333,7 @@ jobs:
         with:
           name: vvd-demo-take1
           path: /tmp/demo_take1.mp4
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload logs
         if: always()
@@ -254,3 +344,4 @@ jobs:
             /tmp/vvd-start.log
             /tmp/ffmpeg.log
             /tmp/vvd-devices.txt
+            /tmp/vvd-logs/
