@@ -457,22 +457,23 @@ jobs:
           fi
           if [ "$fg_verified" -ne 1 ]; then
             # dumpsys unavailable: fall back to the drawer pixel signature.
-            # Dispatch 17 fix: the launcher profile drawer is EXPECTED after
-            # a fresh install+launch. Instead of failing, dismiss it with
-            # KEY_BACK (or ENTER) and re-verify. Only fail if it persists.
+            # Dispatch 18 fix: the launcher profile drawer persists after
+            # BACK/ENTER. Use KEY_HOME to reset to launcher home (clears
+            # any drawer), then relaunch the app via vmsgr.
             if drawer_match /tmp/vvd-logs/shot-foreground-1.png; then
-              log "  drawer visible after launch; attempting to dismiss"
-              key "KEY_BACK" || key "KEY_ENTER" || true
-              sleep 10; shot foreground-1b
+              log "  drawer visible after launch; HOME + relaunch"
+              key "KEY_HOME" || true
+              sleep 10; shot foreground-home
+              fg_launch; sleep 15; shot foreground-1b
               if drawer_match /tmp/vvd-logs/shot-foreground-1b.png; then
-                log "  drawer still visible after BACK; trying ENTER"
-                key "KEY_ENTER" || true
+                log "  drawer still visible after HOME+relaunch; trying BACK"
+                key "KEY_BACK" || true
                 sleep 10; shot foreground-1c
                 if drawer_match /tmp/vvd-logs/shot-foreground-1c.png; then
-                  echo "FOREGROUND GATE FAILED: launcher profile drawer persists after dismissal attempts; refusing to navigate blind"; exit 1
+                  echo "FOREGROUND GATE FAILED: launcher profile drawer persists after HOME+relaunch+BACK; refusing to navigate blind"; exit 1
                 fi
               fi
-              log "  drawer dismissed; proceeding"
+              log "  drawer cleared; proceeding"
             fi
             log "  WARNING: focus unverifiable (dumpsys empty) and no drawer signature; proceeding after explicit launch"
           else
