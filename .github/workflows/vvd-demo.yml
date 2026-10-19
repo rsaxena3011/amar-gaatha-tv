@@ -472,8 +472,34 @@ jobs:
                 if drawer_match /tmp/vvd-logs/shot-foreground-1c.png; then
                   echo "FOREGROUND GATE FAILED: launcher profile drawer persists after HOME+relaunch+BACK; refusing to navigate blind"; exit 1
                 fi
+                # DISPATCH #20 POST-MORTEM (run 39212821104): KEY_HOME
+                # backgrounded the app, and the vmsgr relaunch above fired
+                # while the drawer was still up (intent may not have taken
+                # effect). After KEY_BACK clears the drawer, the app's
+                # foreground status is UNKNOWN. Run 20 proceeded here and
+                # choreography died: ENTER pressed twice, screen never
+                # changed, "never reached Details". Do a final explicit
+                # launch NOW that the drawer is gone, and verify the app
+                # process is alive before proceeding.
+                log "  drawer cleared via BACK; final relaunch to restore foreground"
+                fg_launch; sleep 15; shot foreground-final
               fi
               log "  drawer cleared; proceeding"
+            fi
+            # DISPATCH #21: positive liveness check. pidof proves the app
+            # process exists; without it we're navigating blind (run 20).
+            if timeout -k 5 20 vda -s "$SERIAL" shell pidof "$APP_PKG" >/dev/null 2>&1; then
+              log "  app process alive (pidof $APP_PKG)"
+            elif timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
+              log "  app process alive (ps grep kidsdevotion)"
+            else
+              log "  app process NOT found; one emergency relaunch"
+              fg_launch; sleep 20
+              if timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
+                log "  app process alive after emergency relaunch"
+              else
+                echo "FOREGROUND GATE FAILED: $APP_PKG has no process after drawer clear + relaunch"; exit 1
+              fi
             fi
             log "  WARNING: focus unverifiable (dumpsys empty) and no drawer signature; proceeding after explicit launch"
           else
