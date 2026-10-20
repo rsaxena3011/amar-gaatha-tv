@@ -44,7 +44,7 @@ jobs:
       - name: System deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl x11-utils > /dev/null 2>&1
+          sudo apt-get install -y -qq xvfb ffmpeg xz-utils curl x11-utils xdotool > /dev/null 2>&1
           gh --version || true
 
       - name: Cache Vega SDK
@@ -176,6 +176,34 @@ jobs:
             log "  uname: $un | hw: $hw"
             printf '%s' "$un" | grep -qi amazon && printf '%s' "$hw" | grep -qi vvrp
           }
+          # Host-side nested-virtualization modal (Qt dialog over the guest
+          # window; present in EVERY run 21 screenshot, occluding the guest
+          # in the capture). Pixel-guarded dismiss: the dialog body is light
+          # gray at a fixed host position (guest window at 100,100); the
+          # region (400,246)+60x12 is plain dialog background when the modal
+          # is up and dark launcher/app UI when it is not. Mean luma > 150
+          # = modal up. Best-effort only; never gates the run.
+          modal_mean() {
+            ffmpeg -loglevel error -y -f x11grab -video_size 1920x1080 -i :99 \
+              -vf "crop=60:12:400:246,format=gray" -frames:v 1 -f rawvideo /tmp/modal-probe.raw 2>/dev/null || { echo 0; return; }
+            od -v -An -tu1 /tmp/modal-probe.raw 2>/dev/null | awk '{for(i=1;i<=NF;i++) s+=$i; n+=NF} END {if(n) print int(s/n); else print 0}'
+          }
+          dismiss_modal() {
+            export DISPLAY=:99
+            local m
+            m=$(modal_mean); log "  modal probe: mean luma ${m}"
+            if [ "${m:-0}" -gt 150 ]; then
+              log "  nested-virt modal present; dismissing via xdotool"
+              xdotool mousemove 390 237 click 1 2>/dev/null || true   # "Never show this again"
+              sleep 1
+              xdotool mousemove 768 274 click 1 2>/dev/null || true   # OK button
+              sleep 2
+              m=$(modal_mean)
+              if [ "${m:-0}" -gt 150 ]; then log "  modal still present after click (continuing; cosmetic)"; else log "  modal dismissed"; fi
+            else
+              log "  nested-virt modal not present"
+            fi
+          }
           # Wall-clock deadline (not an iteration count); logs every poll.
           vvd_wait_ready() {
             local budget=$1 deadline=$(( $(date +%s) + $1 )) i=0 devs state
@@ -272,6 +300,12 @@ jobs:
           { echo "$SERIAL"; timeout -k 5 15 vda devices -l; } > /tmp/vvd-devices.txt 2>&1 || true
           echo "SERIAL=$SERIAL" >> "$GITHUB_ENV"
 
+          # 6) DISPATCH #22 (queued since #18): dismiss the host-side
+          #    nested-virtualization modal NOW, before ffmpeg capture starts,
+          #    so it never occludes the guest in the demo video.
+          dismiss_modal || true
+          ffmpeg -loglevel error -y -f x11grab -video_size 1920x1080 -i :99 -frames:v 1 /tmp/vvd-logs/shot-after-modal.png || true
+
       - name: Start ffmpeg capture
         run: |
           # Fragmented MP4 stays playable even if ffmpeg is killed; no cursor.
@@ -312,6 +346,10 @@ jobs:
             out=$(timeout -k 5 20 vda -s "$SERIAL" shell inputd-cli button_press "$1" 2>&1) || { log "  failed: $out"; return 1; }
             if printf '%s' "$out" | grep -qi 'did not match'; then log "  rejected: $out"; return 1; fi
           }
+
+          # DISPATCH #22 safety net: if the nested-virt modal survived the
+          # Boot-step dismiss (or reappeared), clear it before any keys.
+          dismiss_modal || true
 
           # --- FIX #1 (dispatch #9 post-mortem, hardened run 11): gate the
           # install on a settled guest. Run 11 proved the transport flaps on
@@ -414,9 +452,73 @@ jobs:
           # focus before the first nav key; fail loudly instead of
           # navigating the launcher blind.
           APP_PKG="com.saxenawave.kidsdevotion.main"
+          # Real package name (vlcm --pkg-id). APP_PKG above is the activity
+          # ROUTE used in pkg:// URLs; a process runs under PKG_ID only.
+          PKG_ID="com.saxenawave.kidsdevotion"
+          LAST_LAUNCH=0
+          DRAWER_SEEN=0
           fg_launch() {
-            timeout -k 5 60 vda -s "$SERIAL" shell vmsgr send "pkg://$APP_PKG" \
-              || { echo "foreground launch failed"; exit 1; }
+            # DISPATCH #22 FIX 1 (run 39305036379 post-mortem): mirror the
+            # proven Node CLI launch pair. The ONLY successful app start in
+            # run 21 came from `vega run-app`, whose own log shows it runs
+            # `vlcm terminate-app --force --pkg-id com.saxenawave.kidsdevotion`
+            # FIRST and then `vmsgr send pkg://...main`. The gate's two raw
+            # vmsgr sends returned host rc 0 but produced NO guest process.
+            # Terminate first, then send, and capture both commands'
+            # guest-side output in the log so "rc 0, no process" can never
+            # be a mystery again.
+            local tout sout
+            tout=$(timeout -k 5 60 vda -s "$SERIAL" shell vlcm terminate-app --force --pkg-id "$PKG_ID" 2>&1) || true
+            log "  terminate-app $PKG_ID: ${tout:-<no output>}"
+            if ! sout=$(timeout -k 5 60 vda -s "$SERIAL" shell vmsgr send "pkg://$APP_PKG" 2>&1); then
+              echo "foreground launch failed: $sout"; exit 1
+            fi
+            log "  vmsgr send pkg://$APP_PKG: ${sout:-<no output>}"
+            LAST_LAUNCH=$(date +%s)
+          }
+          settle45() {
+            # DISPATCH #22 FIX 2: 45s post-launch settle before any
+            # process/focus verdict (SwiftShader cold start is slow; run 21
+            # probed at 15s/35s post-send and the too-short-wait doubt was
+            # never fully closed). Waits only the REMAINDER of 45s since
+            # the last fg_launch, so paths that already waited don't stall.
+            local elapsed wait_s
+            [ "$LAST_LAUNCH" -gt 0 ] || return 0
+            elapsed=$(( $(date +%s) - LAST_LAUNCH ))
+            if [ "$elapsed" -lt 45 ]; then
+              wait_s=$((45 - elapsed))
+              log "  settle: waiting ${wait_s}s more (45s post-launch)"
+              sleep "$wait_s"
+            fi
+          }
+          app_alive() {
+            # DISPATCH #22 FIX 3: probe the REAL package name. Run 21's
+            # pidof used the activity route (...kidsdevotion.main), which
+            # can never match a running process. ps|grep stays as the
+            # broad fallback.
+            if timeout -k 5 20 vda -s "$SERIAL" shell pidof "$PKG_ID" >/dev/null 2>&1; then
+              log "  app process alive (pidof $PKG_ID)"; return 0
+            fi
+            if timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
+              log "  app process alive (ps grep kidsdevotion)"; return 0
+            fi
+            return 1
+          }
+          grid_launch() {
+            # DISPATCH #22 FIX 4 (queued since #18; evidence run 21
+            # shot-foreground-1c.png): when the drawer was cleared via BACK,
+            # the launcher shows the "Your apps" grid with Kids Devotion as
+            # the FIRST and ONLY tile. Last-resort launch from there: pin
+            # focus to the grid origin (UP/LEFT clamp at the edges), then
+            # ENTER the tile. Only called when DRAWER_SEEN=1 (we know the
+            # grid is the current surface); never inside the app.
+            log "  grid-launch fallback: pin focus to first tile + ENTER"
+            key "KEY_UP" || true; key "KEY_UP" || true
+            key "KEY_LEFT" || true; key "KEY_LEFT" || true
+            sleep 2; shot grid-focus
+            key "KEY_ENTER" || true
+            LAST_LAUNCH=$(date +%s)
+            settle45; shot grid-launched
           }
           focus_probe() {  # prints focused window line; empty if dumpsys unavailable
             timeout -k 5 20 vda -s "$SERIAL" shell dumpsys window windows 2>/dev/null \
@@ -442,14 +544,14 @@ jobs:
           FOCUS="$(focus_probe)"; log "  focus probe: ${FOCUS:-<dumpsys empty>}"
           fg_verified=0
           case "$FOCUS" in
-            *"$APP_PKG"*) fg_verified=1 ;;
+            *"$PKG_ID"*) fg_verified=1 ;;
           esac
           if [ "$fg_verified" -ne 1 ] && [ -n "$FOCUS" ]; then
             log "  focus not on app; one explicit relaunch, then re-probe"
             fg_launch; sleep 15; shot foreground-2
             FOCUS="$(focus_probe)"; log "  focus re-probe: ${FOCUS:-<dumpsys empty>}"
             case "$FOCUS" in
-              *"$APP_PKG"*) fg_verified=1 ;;
+              *"$PKG_ID"*) fg_verified=1 ;;
             esac
             if [ "$fg_verified" -ne 1 ]; then
               echo "FOREGROUND GATE FAILED: focus is '${FOCUS}', not ${APP_PKG}; refusing to navigate the launcher blind"; exit 1
@@ -461,6 +563,7 @@ jobs:
             # BACK/ENTER. Use KEY_HOME to reset to launcher home (clears
             # any drawer), then relaunch the app via vmsgr.
             if drawer_match /tmp/vvd-logs/shot-foreground-1.png; then
+              DRAWER_SEEN=1
               log "  drawer visible after launch; HOME + relaunch"
               key "KEY_HOME" || true
               sleep 10; shot foreground-home
@@ -482,23 +585,33 @@ jobs:
                 # launch NOW that the drawer is gone, and verify the app
                 # process is alive before proceeding.
                 log "  drawer cleared via BACK; final relaunch to restore foreground"
-                fg_launch; sleep 15; shot foreground-final
+                fg_launch; settle45; shot foreground-final
               fi
               log "  drawer cleared; proceeding"
             fi
-            # DISPATCH #21: positive liveness check. pidof proves the app
-            # process exists; without it we're navigating blind (run 20).
-            if timeout -k 5 20 vda -s "$SERIAL" shell pidof "$APP_PKG" >/dev/null 2>&1; then
-              log "  app process alive (pidof $APP_PKG)"
-            elif timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
-              log "  app process alive (ps grep kidsdevotion)"
+            # DISPATCH #21/#22: positive liveness check before navigating.
+            # Probe targets the REAL package (fix 3) after a full 45s
+            # post-launch settle (fix 2). Failure ladder: emergency
+            # terminate+send relaunch (fix 1), then, if the drawer was in
+            # play and the "Your apps" grid is the current surface, the
+            # grid-launch fallback (fix 4). Fail loudly only after all three.
+            settle45
+            if app_alive; then
+              log "  liveness confirmed"
             else
-              log "  app process NOT found; one emergency relaunch"
-              fg_launch; sleep 20
-              if timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
+              log "  app process NOT found; emergency relaunch (terminate+send pair)"
+              fg_launch; settle45; shot foreground-emergency
+              if app_alive; then
                 log "  app process alive after emergency relaunch"
+              elif [ "$DRAWER_SEEN" -eq 1 ]; then
+                grid_launch
+                if app_alive; then
+                  log "  app process alive after grid launch"
+                else
+                  echo "FOREGROUND GATE FAILED: $PKG_ID has no process after terminate+send relaunch + grid fallback"; exit 1
+                fi
               else
-                echo "FOREGROUND GATE FAILED: $APP_PKG has no process after drawer clear + relaunch"; exit 1
+                echo "FOREGROUND GATE FAILED: $PKG_ID has no process after drawer clear + terminate+send relaunch"; exit 1
               fi
             fi
             log "  WARNING: focus unverifiable (dumpsys empty) and no drawer signature; proceeding after explicit launch"
