@@ -714,9 +714,90 @@ jobs:
           key_wait_change KEY_ENTER player /tmp/vvd-logs/shot-detail.png \
             || key_wait_change KEY_ENTER player-retry /tmp/vvd-logs/shot-player.png \
             || { echo "never reached Player"; exit 1; }
-          key KEY_PLAYPAUSE; sleep 8; shot paused   # Pause -> Pause & Ask panel
+          # --- DISPATCH #24 (run 39457301151 post-mortem): the pause
+          # never landed in run 23. PLAYPAUSE fired ~1-6s after the
+          # Player screen appeared, while the player was still
+          # initializing / buffering the streamed MP4, so the toggle
+          # was swallowed and shot-paused/shot-answer/shot-final all
+          # show the video playing bare. The app is NOT at fault:
+          # PlayerScreen.vega.tsx renders PauseAndAsk whenever paused,
+          # and scene 1 (video 0-120s) has authored questions. So:
+          # never pause on a blind timer again. (1) Confirm playback
+          # by MOTION (shot pairs 4s apart, video region must change;
+          # ~90s poll covers stream buffering). (2) Pause at ~10-15s
+          # of CONFIRMED playback, deep inside scene 1. (3) Verify the
+          # pause FROZE the frame (pair ~2s apart identical in the
+          # video region) AND the paused frame differs from the
+          # playing frames (PauseAndAsk overlay); retry PLAYPAUSE up
+          # to 3 times, re-checking state before each press so a good
+          # pause is never resumed by a blind re-press. (4) Only a
+          # verified pause unlocks DOWN/ENTER, and the answer card
+          # must visibly change the screen before CHOREOGRAPHY-DONE.
+          region_diff_pct() {  # $1=shotA $2=shotB; prints % of differing bytes in the guest/video region; 100 on error
+            ffmpeg -loglevel error -y -i "$1" -vf "crop=962:540:100:100,format=rgb24" \
+              -f rawvideo /tmp/pd-a.raw 2>/dev/null || { echo 100; return; }
+            ffmpeg -loglevel error -y -i "$2" -vf "crop=962:540:100:100,format=rgb24" \
+              -f rawvideo /tmp/pd-b.raw 2>/dev/null || { echo 100; return; }
+            local total diffb
+            total=$(stat -c%s /tmp/pd-a.raw)
+            [ "${total:-0}" -gt 0 ] || { echo 100; return; }
+            diffb=$(cmp -l /tmp/pd-a.raw /tmp/pd-b.raw | wc -l)
+            echo $(( diffb * 100 / total ))
+          }
+          log "pause sequence: waiting for CONFIRMED playback (motion in video region)"
+          shot play-a
+          PLAYING=0
+          for i in $(seq 1 22); do
+            sleep 4; shot play-b
+            if [ -f /tmp/vvd-logs/shot-play-a.png ] && [ -f /tmp/vvd-logs/shot-play-b.png ]; then
+              PD=$(region_diff_pct /tmp/vvd-logs/shot-play-a.png /tmp/vvd-logs/shot-play-b.png)
+            else
+              PD=0
+            fi
+            log "  playback poll $i: video-region diff ${PD}% (want >=4 = motion)"
+            if [ "${PD:-0}" -ge 4 ]; then PLAYING=1; break; fi
+            mv /tmp/vvd-logs/shot-play-b.png /tmp/vvd-logs/shot-play-a.png
+          done
+          if [ "$PLAYING" -ne 1 ]; then
+            echo "PAUSE SEQUENCE FAILED: playback never confirmed (no motion in video region after ~90s of polling); refusing to pause blind"; exit 1
+          fi
+          log "playback CONFIRMED (motion in video region); letting it play ~12s before pausing"
+          sleep 12; shot playing
+          PAUSED=0; PRESSES=0
+          for check in 1 2 3 4; do
+            shot pausechk-a; sleep 2; shot pausechk-b
+            FROZEN=$(region_diff_pct /tmp/vvd-logs/shot-pausechk-a.png /tmp/vvd-logs/shot-pausechk-b.png)
+            PANEL=$(region_diff_pct /tmp/vvd-logs/shot-playing.png /tmp/vvd-logs/shot-pausechk-b.png)
+            log "  pause check $check (PLAYPAUSE presses so far: $PRESSES): frozen diff ${FROZEN}% (want <=2), vs-playing diff ${PANEL}% (want >=3 = PauseAndAsk overlay)"
+            if [ "${FROZEN:-100}" -le 2 ] && [ "${PANEL:-0}" -ge 3 ]; then
+              PAUSED=1
+              cp /tmp/vvd-logs/shot-pausechk-b.png /tmp/vvd-logs/shot-paused.png
+              break
+            fi
+            [ "$check" -eq 4 ] && break
+            key KEY_PLAYPAUSE || true; PRESSES=$((PRESSES+1))
+            log "  not paused yet; PLAYPAUSE press #$PRESSES, settle 4s"
+            sleep 4
+          done
+          if [ "$PAUSED" -ne 1 ]; then
+            echo "PAUSE SEQUENCE FAILED: PLAYPAUSE never produced a verified frozen frame after $PRESSES presses"; exit 1
+          fi
+          log "pause VERIFIED after $PRESSES press(es): frame frozen + Pause & Ask overlay present; shot-paused saved"
           key KEY_DOWN;      sleep 2
           key KEY_ENTER;     sleep 10; shot answer   # question chip -> answer card (take ends here)
+          ANSD=$(region_diff_pct /tmp/vvd-logs/shot-paused.png /tmp/vvd-logs/shot-answer.png)
+          log "  answer check: paused->answer diff ${ANSD}% (want >=2 = answer card on screen)"
+          if [ "${ANSD:-0}" -lt 2 ]; then
+            log "  answer card NOT detected; retrying DOWN/ENTER once"
+            key KEY_DOWN;  sleep 2
+            key KEY_ENTER; sleep 10; shot answer-retry
+            ANSD=$(region_diff_pct /tmp/vvd-logs/shot-paused.png /tmp/vvd-logs/shot-answer-retry.png)
+            log "  answer check (retry): diff ${ANSD}%"
+            if [ "${ANSD:-0}" -lt 2 ]; then
+              echo "CHOREOGRAPHY FAILED: answer card never appeared after DOWN/ENTER (pause was verified, but no answer card)"; exit 1
+            fi
+            cp /tmp/vvd-logs/shot-answer-retry.png /tmp/vvd-logs/shot-answer.png
+          fi
           echo "CHOREOGRAPHY-DONE"
 
       - name: Stop capture
