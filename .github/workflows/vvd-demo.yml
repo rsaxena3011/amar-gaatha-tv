@@ -464,8 +464,14 @@ jobs:
           # Collect diagnostics as the ring-buffer fallback. The
           # choreography below is byte-identical to run 26.
           log "dispatch #27: starting guest log tails (diagnostic)"
-          timeout -k 5 1500 vda -s "$SERIAL" shell journalctl -f --no-pager -o short-precise \
-            > /tmp/vvd-logs/guest-journal-live.log 2>&1 &
+          # DISPATCH #28: run 27's journalctl attempt was intercepted by
+          # the Vega developer shell: "journalctl is not supported in
+          # developer mode shell. Please use loggingctl instead."
+          # loggingctl log is the platform tool (supports -f follow,
+          # -o short_precise, and -v <package> filtering). logcat does
+          # not exist on Vega. Use loggingctl, package-filtered.
+          timeout -k 5 1500 vda -s "$SERIAL" shell loggingctl log -f -o short_precise -v com.saxenawave.kidsdevotion \
+            > /tmp/vvd-logs/guest-applog-live.log 2>&1 &
           timeout -k 5 1500 vda -s "$SERIAL" shell logcat -v time \
             > /tmp/vvd-logs/guest-logcat-live.log 2>&1 &
           log "guest clock at tail start: $(timeout -k 5 15 vda -s "$SERIAL" shell date 2>/dev/null || echo unavailable)"
@@ -1027,8 +1033,11 @@ jobs:
           # '[PlayerScreen.kepler] - Navigating back' (Exit select),
           # '- Cleaning up video handler' alone (plain goBack).
           if [ -n "${SERIAL:-}" ]; then
-            timeout -k 5 60 vda -s "$SERIAL" shell journalctl --no-pager -o short-precise -n 8000 \
-              > "$D/guest-journal-dump.log" 2>&1 || true
+            # DISPATCH #28: loggingctl replaces journalctl (see run 27).
+            timeout -k 5 60 vda -s "$SERIAL" shell loggingctl log -o short_precise -v com.saxenawave.kidsdevotion \
+              > "$D/guest-applog-dump.log" 2>&1 || true
+            timeout -k 5 60 vda -s "$SERIAL" shell loggingctl log -o short_precise \
+              | tail -n 3000 > "$D/guest-applog-dump-all.log" 2>&1 || true
             timeout -k 5 60 vda -s "$SERIAL" shell logcat -d -v time \
               > "$D/guest-logcat-dump.log" 2>&1 || true
             timeout -k 5 30 vda -s "$SERIAL" shell "ls -la /var/log/ 2>/dev/null; echo ---; tail -n 500 /var/log/messages 2>/dev/null; echo ---; dmesg 2>/dev/null | tail -n 200" \
