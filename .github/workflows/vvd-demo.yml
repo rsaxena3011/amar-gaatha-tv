@@ -763,26 +763,120 @@ jobs:
           fi
           log "playback CONFIRMED (motion in video region); letting it play ~12s before pausing"
           sleep 12; shot playing
-          PAUSED=0; PRESSES=0
-          for check in 1 2 3 4; do
-            shot pausechk-a; sleep 2; shot pausechk-b
-            FROZEN=$(region_diff_pct /tmp/vvd-logs/shot-pausechk-a.png /tmp/vvd-logs/shot-pausechk-b.png)
-            PANEL=$(region_diff_pct /tmp/vvd-logs/shot-playing.png /tmp/vvd-logs/shot-pausechk-b.png)
-            log "  pause check $check (PLAYPAUSE presses so far: $PRESSES): frozen diff ${FROZEN}% (want <=2), vs-playing diff ${PANEL}% (want >=3 = PauseAndAsk overlay)"
+          # --- DISPATCH #25 (run 39459731702 post-mortem): the #24 gate
+          # machinery is PROVEN (it correctly refused a pause that never
+          # happened), but the ACTUATOR is wrong: inputd-cli KEY_PLAYPAUSE
+          # is accepted by inputd yet never pauses - 3 presses at ~15/23/
+          # 30s of CONFIRMED playback, and the MP4 never froze for one
+          # sampled interval. App source is correct (PlayPause ->
+          # togglePausePlay; PauseAndAsk renders when paused; the kepler
+          # RemoteControlManager maps HWEvent 'playpause' -> PlayPause),
+          # so the break is media-key delivery/routing inside the
+          # emulator (media-session intercept, double-toggle, or a guest
+          # event other than 'playpause'). #25 changes ONLY the
+          # actuator. The #24 verified-pause gate (frozen pair <=2% AND
+          # vs-playing panel diff >=3%) remains the sole arbiter, and
+          # state is re-checked before EVERY attempt, so a pause that
+          # already took is never undone by a blind toggle re-press.
+          # Actuator ladder:
+          #   A) OVERLAY PAUSE BUTTON (primary): KEY_UP is in the kepler
+          #      key mapping but has no case in PlayerScreen's switch,
+          #      so it hits the default branch -> showControls(). The
+          #      VideoOverlay's Pause FocusablePressable carries
+          #      DefaultFocus and its onSelect IS togglePausePlay. The
+          #      overlay scrim (rgba(0,0,0,0.5), full-screen) drops the
+          #      guest mean luma hard, so a luma probe confirms the
+          #      overlay is up before ENTER is pressed.
+          #   B) HOST-SIDE REMOTE CLICK: xdotool-click the VVD window's
+          #      on-screen remote play/pause button (host 1180,410;
+          #      center measured on run-24 screenshots) - the virtual
+          #      remote's genuine input path; same host-side technique
+          #      as the proven nested-virt modal dismiss.
+          #   C) ALTERNATE KEY PROBES (gate-arbitrated, in order):
+          #      KEY_PLAY, KEY_PAUSE, KEY_MEDIA_PLAY_PAUSE, and a
+          #      long-press KEY_PLAYPAUSE (inputd-cli button_press
+          #      accepts a `long` modifier).
+          # Time discipline: PauseAndAsk renders NOTHING outside the
+          # authored question windows (scene 1 = video 0-120s), so the
+          # ladder is lean (A x2, B x2, C x4, each ~8-10s): worst case
+          # the verified pause lands by ~85s of video time.
+          PAUSED=0; WINNER=""
+          pause_check() {  # $1=tag; rc 0 = VERIFIED pause (saves shot-paused)
+            shot "pausechk-$1-a"; sleep 2; shot "pausechk-$1-b"
+            FROZEN=$(region_diff_pct "/tmp/vvd-logs/shot-pausechk-$1-a.png" "/tmp/vvd-logs/shot-pausechk-$1-b.png")
+            PANEL=$(region_diff_pct /tmp/vvd-logs/shot-playing.png "/tmp/vvd-logs/shot-pausechk-$1-b.png")
+            log "  pause check [$1]: frozen diff ${FROZEN}% (want <=2), vs-playing diff ${PANEL}% (want >=3 = PauseAndAsk overlay)"
             if [ "${FROZEN:-100}" -le 2 ] && [ "${PANEL:-0}" -ge 3 ]; then
-              PAUSED=1
-              cp /tmp/vvd-logs/shot-pausechk-b.png /tmp/vvd-logs/shot-paused.png
-              break
+              cp "/tmp/vvd-logs/shot-pausechk-$1-b.png" /tmp/vvd-logs/shot-paused.png
+              return 0
             fi
-            [ "$check" -eq 4 ] && break
-            key KEY_PLAYPAUSE || true; PRESSES=$((PRESSES+1))
-            log "  not paused yet; PLAYPAUSE press #$PRESSES, settle 4s"
-            sleep 4
+            return 1
+          }
+          key_long() {  # $1=key; inputd-cli long-press variant
+            local out
+            log "key $1 (long press)"
+            out=$(timeout -k 5 20 vda -s "$SERIAL" shell inputd-cli button_press "$1" long 2>&1) || { log "  failed: $out"; return 1; }
+            if printf '%s' "$out" | grep -qi 'did not match'; then log "  rejected: $out"; return 1; fi
+          }
+          # --- Actuator A: overlay Pause button (showControls + ENTER)
+          log "actuator A: KEY_UP -> showControls, luma-probe the overlay, ENTER on the DefaultFocus Pause button"
+          for atry in 1 2; do
+            if [ "$PAUSED" -eq 1 ]; then break; fi
+            if [ "$atry" -gt 1 ]; then
+              # State re-check before a second ENTER: a late-landing
+              # toggle from attempt 1 must never be undone by a re-press.
+              if pause_check "a$atry-pre"; then PAUSED=1; WINNER="overlay Pause button (late landing)"; break; fi
+            fi
+            shot overlay-base
+            BASE_LUMA=$(guest_luma /tmp/vvd-logs/shot-overlay-base.png)
+            key KEY_UP || true
+            sleep 2; shot "overlay-probe$atry"
+            PROBE_LUMA=$(guest_luma "/tmp/vvd-logs/shot-overlay-probe$atry.png")
+            log "  overlay probe $atry: guest luma base=${BASE_LUMA} probe=${PROBE_LUMA} (overlay scrim confirmed if probe <= 78% of base)"
+            if [ "${BASE_LUMA:-0}" -gt 10 ] && [ "${PROBE_LUMA:-0}" -gt 0 ] && [ "${PROBE_LUMA:-999999}" -le $(( ${BASE_LUMA:-0} * 78 / 100 )) ]; then
+              log "  overlay CONFIRMED (scrim luma drop); ENTER on the focused Pause button"
+              key KEY_ENTER || true
+              sleep 1
+              if pause_check "a$atry"; then PAUSED=1; WINNER="overlay Pause button (KEY_UP showControls + ENTER)"; fi
+            else
+              log "  overlay NOT confirmed by luma probe; ENTER withheld (would be blind)"
+            fi
           done
+          # --- Actuator B: host-side click on the VVD on-screen remote
           if [ "$PAUSED" -ne 1 ]; then
-            echo "PAUSE SEQUENCE FAILED: PLAYPAUSE never produced a verified frozen frame after $PRESSES presses"; exit 1
+            log "actuator B: xdotool click on the VVD on-screen remote play/pause button (host 1180,410)"
+            for btry in 1 2; do
+              if [ "$PAUSED" -eq 1 ]; then break; fi
+              if [ "$btry" -gt 1 ]; then
+                if pause_check "b$btry-pre"; then PAUSED=1; WINNER="remote click (late landing)"; break; fi
+              fi
+              xdotool mousemove 1180 410 click 1 2>/dev/null || true
+              log "  remote play/pause clicked (try $btry); settle 2s"
+              sleep 2; shot "remote-probe$btry"
+              if pause_check "b$btry"; then PAUSED=1; WINNER="VVD remote play/pause click (xdotool)"; fi
+            done
           fi
-          log "pause VERIFIED after $PRESSES press(es): frame frozen + Pause & Ask overlay present; shot-paused saved"
+          # --- Actuator C: alternate inputd keys (gate-arbitrated)
+          if [ "$PAUSED" -ne 1 ]; then
+            log "actuator C: alternate key probes KEY_PLAY / KEY_PAUSE / KEY_MEDIA_PLAY_PAUSE / long-press KEY_PLAYPAUSE"
+            for ckey in KEY_PLAY KEY_PAUSE KEY_MEDIA_PLAY_PAUSE; do
+              if [ "$PAUSED" -eq 1 ]; then break; fi
+              key "$ckey" || true
+              log "  probe $ckey sent; settle 3s"
+              sleep 3
+              if pause_check "c-$ckey"; then PAUSED=1; WINNER="inputd $ckey"; fi
+            done
+            if [ "$PAUSED" -ne 1 ]; then
+              key_long KEY_PLAYPAUSE || true
+              log "  probe long-press KEY_PLAYPAUSE sent; settle 3s"
+              sleep 3
+              if pause_check "c-longplaypause"; then PAUSED=1; WINNER="inputd long-press KEY_PLAYPAUSE"; fi
+            fi
+          fi
+          if [ "$PAUSED" -ne 1 ]; then
+            echo "PAUSE SEQUENCE FAILED: no actuator (overlay button / remote click / alternate keys) produced a verified frozen frame"; exit 1
+          fi
+          log "pause VERIFIED via $WINNER: frame frozen + Pause & Ask overlay present; shot-paused saved"
           key KEY_DOWN;      sleep 2
           key KEY_ENTER;     sleep 10; shot answer   # question chip -> answer card (take ends here)
           ANSD=$(region_diff_pct /tmp/vvd-logs/shot-paused.png /tmp/vvd-logs/shot-answer.png)
