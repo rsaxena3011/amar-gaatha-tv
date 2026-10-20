@@ -877,21 +877,84 @@ jobs:
             echo "PAUSE SEQUENCE FAILED: no actuator (overlay button / remote click / alternate keys) produced a verified frozen frame"; exit 1
           fi
           log "pause VERIFIED via $WINNER: frame frozen + Pause & Ask overlay present; shot-paused saved"
-          key KEY_DOWN;      sleep 2
-          key KEY_ENTER;     sleep 10; shot answer   # question chip -> answer card (take ends here)
-          ANSD=$(region_diff_pct /tmp/vvd-logs/shot-paused.png /tmp/vvd-logs/shot-answer.png)
-          log "  answer check: paused->answer diff ${ANSD}% (want >=2 = answer card on screen)"
-          if [ "${ANSD:-0}" -lt 2 ]; then
-            log "  answer card NOT detected; retrying DOWN/ENTER once"
+          # --- DISPATCH #26 (run 39462478099 post-mortem): the full
+          # flow IS on camera, but the take does not END on the answer
+          # card: ~0.5-1s after the card renders, the app exits the
+          # player to Details (navigateBack signature), so the old
+          # shot-answer (ENTER + 10s) photographed Details and the #24
+          # check false-positived (98% diff = navigation, not card
+          # presence). Three changes; everything else untouched:
+          #  (1) STRENGTHENED ANSWER CHECK (answer_ok): the candidate
+          #      must (a) differ from shot-paused by >=2% (something
+          #      opened) AND (b) differ from this run's shot-detail by
+          #      >=6% (it is NOT the Details screen). Offline
+          #      calibration on run-25 artifacts, guest-region diffs:
+          #      card D1=97/D2=15 PASS; Details D1=98/D2=0 FAIL;
+          #      pure-black mid-exit frame D1=99/D2=4 FAIL; unchanged
+          #      paused D1=0 FAIL. A controls-strip resemblance test
+          #      was designed and REJECTED by the same calibration:
+          #      in the card state the video surface behind the panel
+          #      is black, so every paused-resemblance byte test reads
+          #      ~95% and would fail the true card. D2 is the
+          #      Details-killer: Details is pixel-static (0% across
+          #      8 minutes in run 25), so any candidate that IS the
+          #      Details screen scores ~0 against shot-detail.
+          #  (2) DWELL SHOTS: the card's on-screen life can be ~1s,
+          #      so photograph at ~+1s/+2s/+3s after the ENTER; the
+          #      first dwell shot passing answer_ok is saved as the
+          #      real shot-answer, caught while the card is up.
+          #  (3) SINGLE-DELIVERY ENTER: the primary answer ENTER is a
+          #      host-side xdotool click on the VVD remote's OK button
+          #      (1156,282; grounding-verified center on run-25
+          #      frames) - the virtual remote's genuine input path.
+          #      Lead suspect for the exit is the inputd ENTER being
+          #      delivered twice via FocusablePressable's dual
+          #      onSelect/onPress wiring; the remote click delivers
+          #      exactly once. If the click yields no verified card,
+          #      fall back to the inputd KEY_ENTER path, also
+          #      dwell-shot and triple-checked.
+          answer_ok() {  # $1=candidate shot path; rc 0 = verified answer card
+            local cand="$1" d1 d2
+            d1=$(region_diff_pct /tmp/vvd-logs/shot-paused.png "$cand")
+            d2=$(region_diff_pct /tmp/vvd-logs/shot-detail.png "$cand")
+            log "  answer check [$cand]: vs-paused ${d1}% (want >=2 = something opened), vs-detail ${d2}% (want >=6 = not the Details screen)"
+            [ "${d1:-0}" -ge 2 ] && [ "${d2:-0}" -ge 6 ]
+          }
+          answer_dwell() {  # $1=tag; shots at ~+1s/+2s/+3s after the ENTER; rc 0 = a dwell shot verified (copied to shot-answer)
+            local tag="$1" s
+            sleep 1; shot "answer-$tag-1"
+            sleep 1; shot "answer-$tag-2"
+            sleep 1; shot "answer-$tag-3"
+            for s in 1 2 3; do
+              if answer_ok "/tmp/vvd-logs/shot-answer-$tag-$s.png"; then
+                cp "/tmp/vvd-logs/shot-answer-$tag-$s.png" /tmp/vvd-logs/shot-answer.png
+                log "  answer card VERIFIED in dwell shot answer-$tag-$s; saved as shot-answer"
+                return 0
+              fi
+            done
+            return 1
+          }
+          key KEY_DOWN;      sleep 2    # focus question chip 1
+          log "answer ENTER via remote-OK click (single delivery): xdotool click (1156,282)"
+          xdotool mousemove 1156 282 click 1 2>/dev/null || true
+          ANSWER=0
+          if answer_dwell click; then ANSWER=1; fi
+          if [ "$ANSWER" -ne 1 ]; then
+            log "  remote-OK click produced no verified card; falling back to inputd KEY_ENTER once"
             key KEY_DOWN;  sleep 2
-            key KEY_ENTER; sleep 10; shot answer-retry
-            ANSD=$(region_diff_pct /tmp/vvd-logs/shot-paused.png /tmp/vvd-logs/shot-answer-retry.png)
-            log "  answer check (retry): diff ${ANSD}%"
-            if [ "${ANSD:-0}" -lt 2 ]; then
-              echo "CHOREOGRAPHY FAILED: answer card never appeared after DOWN/ENTER (pause was verified, but no answer card)"; exit 1
-            fi
-            cp /tmp/vvd-logs/shot-answer-retry.png /tmp/vvd-logs/shot-answer.png
+            key KEY_ENTER
+            if answer_dwell key; then ANSWER=1; fi
           fi
+          if [ "$ANSWER" -ne 1 ]; then
+            echo "CHOREOGRAPHY FAILED: answer card never verified after chip ENTER (pause was verified; strengthened check rejects Details/black/no-change)"; exit 1
+          fi
+          # Hold so the take ENDS on the card: leave the app alone for
+          # the remaining settle, then take an evidence shot. If the
+          # post-answer exit still fired, shot-answer-late shows it;
+          # the dwell-verified shot-answer above is the card regardless.
+          sleep 7; shot answer-late
+          LATE=$(region_diff_pct /tmp/vvd-logs/shot-answer.png /tmp/vvd-logs/shot-answer-late.png)
+          log "  ending hold check: answer->late diff ${LATE}% (0-ish = take ends holding the card; large = post-answer exit still fired)"
           echo "CHOREOGRAPHY-DONE"
 
       - name: Stop capture
