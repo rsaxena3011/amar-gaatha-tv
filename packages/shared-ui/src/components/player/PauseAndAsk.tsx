@@ -23,6 +23,8 @@ interface PauseAndAskProps {
   currentTime: number;
   lang?: Lang;
   level?: Level;
+  /** Notified synchronously when a question chip is selected. */
+  onQuestionSelect?: (qa: QA) => void;
 }
 
 const PauseAndAsk: React.FC<PauseAndAskProps> = ({
@@ -30,6 +32,7 @@ const PauseAndAsk: React.FC<PauseAndAskProps> = ({
   currentTime,
   lang = "en",
   level = "kid",
+  onQuestionSelect,
 }) => {
   const questions = useMemo(
     () => questionsAt(item, currentTime),
@@ -53,7 +56,10 @@ const PauseAndAsk: React.FC<PauseAndAskProps> = ({
           <FocusablePressable
             key={qa.q_en}
             text={lang === "hi" ? qa.q_hi : qa.q_en}
-            onSelect={() => setSelected(qa)}
+            onSelect={() => {
+              setSelected(qa);
+              onQuestionSelect?.(qa);
+            }}
             style={styles.chip}
           />
         ))}

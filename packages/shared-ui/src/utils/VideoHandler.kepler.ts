@@ -221,11 +221,30 @@ export class VideoHandler {
 
   /**
    * Handles the 'ended' event
+   *
+   * Hardened 2026-10-21 (C024 exit-bug hunt): log the player values on
+   * every 'ended' event and only honor it when the position is credibly
+   * at the end of the media (duration finite > 0 and currentTime within
+   * 1.5s of duration). A spurious 'ended' mid-playback must never tear
+   * down the player via the isVideoEnded effect in PlayerScreen.
    */
   onEnded = () => {
-    if (this.videoRef.current?.ended) {
-      console.log('[VideoHandler] - onEnded');
+    const player = this.videoRef.current;
+    const currentTime = player?.currentTime ?? 0;
+    const duration = player?.duration ?? 0;
+    const paused = player?.paused ?? true;
+    console.log(
+      `[VideoHandler] - onEnded event: ended=${player?.ended} currentTime=${currentTime} duration=${duration} paused=${paused}`,
+    );
+    if (player?.ended && duration > 0 && currentTime >= duration - 1.5) {
+      console.log(
+        '[VideoHandler] - onEnded honored (position is at end of media)',
+      );
       this.setIsVideoEnded(true);
+    } else if (player?.ended) {
+      console.warn(
+        '[VideoHandler] - onEnded IGNORED: ended flag set but position is not near duration (spurious ended)',
+      );
     }
   };
 

@@ -65,6 +65,10 @@ export default function PlayerScreen() {
   const surfaceHandleRef = useRef<string | null>(null);
   const captionViewHandleRef = useRef<string | null>(null);
   const hideControlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Exit-bug hunt 2026-10-21 (C024): navigateBack is reason-coded and
+  // first-call-wins; lastPanelSelectAtRef arms the overlay-exit guard.
+  const navigatingBackRef = useRef<boolean>(false);
+  const lastPanelSelectAtRef = useRef<number>(0);
   const currentTimeRef = useRef<number>(0);
   const durationRef = useRef<number>(0);
   const videoHandlerRef = useRef<VideoHandler | null>(null);
@@ -130,28 +134,70 @@ export default function PlayerScreen() {
   }, [showControls]);
 
   /**
-   * Navigate back with cleanup
+   * Navigate back with cleanup.
+   *
+   * Reason-coded + first-call-wins (C024 exit-bug hunt, 2026-10-21):
+   * guest logs from run 39473199740 proved the post-answer exit was the
+   * overlay Exit chip's onSelect firing ~8ms after a Pause & Ask chip
+   * select (the select's second phase re-dispatched by the spatial
+   * engine after the card-render focus reshuffle). Every caller passes
+   * its reason so the trigger is identifiable in logs, and repeat
+   * calls during teardown are no-ops.
    */
-  const navigateBack = useCallback(() => {
-    console.log('[PlayerScreen.kepler] - Navigating back');
+  const navigateBack = useCallback(
+    (reason: string) => {
+      if (navigatingBackRef.current) {
+        console.log(
+          `[PlayerScreen.kepler] - Navigating back SUPPRESSED (already in progress, ignored reason: ${reason})`,
+        );
+        return;
+      }
+      navigatingBackRef.current = true;
+      console.log(
+        `[PlayerScreen.kepler] - Navigating back (reason: ${reason})`,
+      );
 
-    // Clear surface and caption handles
-    if (surfaceHandleRef.current && videoRef.current) {
-      videoRef.current.clearSurfaceHandle(surfaceHandleRef.current);
+      // Clear surface and caption handles
+      if (surfaceHandleRef.current && videoRef.current) {
+        videoRef.current.clearSurfaceHandle(surfaceHandleRef.current);
+      }
+      if (captionViewHandleRef.current && videoRef.current) {
+        videoRef.current.clearCaptionViewHandle(captionViewHandleRef.current);
+      }
+
+      // Destroy video elements
+      videoHandlerRef.current?.destroyVideoElements();
+      videoRef.current = null;
+
+      // Navigate back after short delay
+      setTimeout(() => {
+        navigation.goBack();
+      }, 300);
+    },
+    [navigation],
+  );
+
+  /**
+   * Overlay Exit select guard (THE fix for the post-answer exit).
+   *
+   * Proven in run 39473199740's guest log: the chip select's second
+   * phase landed on the reshuffled focus (the overlay Exit chip) 8ms
+   * after the chip's own select, tearing down the player right after
+   * the answer card rendered. Any overlay-exit select arriving within
+   * 1000ms of a Pause & Ask question select is that re-dispatch, not
+   * user intent, and is suppressed. Genuine exits are unaffected: the
+   * guard only arms when a question was just selected.
+   */
+  const handleOverlayExit = useCallback(() => {
+    const sincePanelSelect = Date.now() - lastPanelSelectAtRef.current;
+    if (lastPanelSelectAtRef.current > 0 && sincePanelSelect < 1000) {
+      console.log(
+        `[PlayerScreen.kepler] - Overlay exit SUPPRESSED (${sincePanelSelect}ms after Pause & Ask question select; spatial re-dispatch guard)`,
+      );
+      return;
     }
-    if (captionViewHandleRef.current && videoRef.current) {
-      videoRef.current.clearCaptionViewHandle(captionViewHandleRef.current);
-    }
-
-    // Destroy video elements
-    videoHandlerRef.current?.destroyVideoElements();
-    videoRef.current = null;
-
-    // Navigate back after short delay
-    setTimeout(() => {
-      navigation.goBack();
-    }, 300);
-  }, [navigation]);
+    navigateBack('overlay-exit');
+  }, [navigateBack]);
 
   /**
    * Initialize video handler and start playback
@@ -199,7 +245,7 @@ export default function PlayerScreen() {
     if (isVideoEnded) {
       setPaused(true);
       setControlsVisible(true);
-      navigateBack();
+      navigateBack('video-ended-effect');
     }
   }, [isVideoEnded, navigateBack]);
 
@@ -228,7 +274,7 @@ export default function PlayerScreen() {
             seek(currentTimeRef.current - 10);
             break;
           case SupportedKeys.Back:
-            navigateBack();
+            navigateBack('remote-back-key');
             break;
           case SupportedKeys.PlayPause:
             togglePausePlay();
@@ -248,7 +294,7 @@ export default function PlayerScreen() {
     const backHandler = BackHandler.addEventListener(
       'hardwareBackPress',
       () => {
-        navigateBack();
+        navigateBack('hardware-back');
         return true;
       },
     );
@@ -322,7 +368,7 @@ export default function PlayerScreen() {
       <SpatialNavigationRoot isActive={isFocused}>
         <View style={styles.container}>
           <View style={styles.errorContainer}>
-            <ExitButton onSelect={navigateBack} />
+            <ExitButton onSelect={() => navigateBack('error-screen-exit')} />
           </View>
         </View>
       </SpatialNavigationRoot>
@@ -350,13 +396,22 @@ export default function PlayerScreen() {
             visible={controlsVisible}
             paused={paused}
             onPlayPause={togglePausePlay}
-            onExit={navigateBack}
+            onExit={handleOverlayExit}
             currentTime={currentTime}
             duration={durationRef.current}
             isBuffering={isVideoBuffering}
             pausedPanel={
               gaathaItem ? (
-                <PauseAndAsk item={gaathaItem} currentTime={currentTime} />
+                <PauseAndAsk
+                  item={gaathaItem}
+                  currentTime={currentTime}
+                  onQuestionSelect={(qa) => {
+                    lastPanelSelectAtRef.current = Date.now();
+                    console.log(
+                      `[PlayerScreen.kepler] - Pause & Ask question selected: ${qa.q_en}`,
+                    );
+                  }}
+                />
               ) : undefined
             }
           />
