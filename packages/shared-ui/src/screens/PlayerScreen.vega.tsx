@@ -69,6 +69,10 @@ export default function PlayerScreen() {
   // first-call-wins; lastPanelSelectAtRef arms the overlay-exit guard.
   const navigatingBackRef = useRef<boolean>(false);
   const lastPanelSelectAtRef = useRef<number>(0);
+  // Timer fix (Argon catch, 2026-10-21): while paused, the overlay
+  // carries the Pause & Ask panel; the 5s auto-hide must never unmount
+  // it (hiding wipes the answer card ~5s after the answer select).
+  const pausedRef = useRef<boolean>(false);
   const currentTimeRef = useRef<number>(0);
   const durationRef = useRef<number>(0);
   const videoHandlerRef = useRef<VideoHandler | null>(null);
@@ -82,18 +86,32 @@ export default function PlayerScreen() {
     durationRef.current = duration;
   }, [duration]);
 
+  // Keep pausedRef in sync; entering pause cancels any pending
+  // auto-hide so the Pause & Ask panel (and its answer card) survives.
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (paused && hideControlsTimeoutRef.current) {
+      clearTimeout(hideControlsTimeoutRef.current);
+      hideControlsTimeoutRef.current = null;
+    }
+  }, [paused]);
+
   /**
-   * Show controls with auto-hide
+   * Show controls with auto-hide (auto-hide only while NOT paused:
+   * while paused the overlay hosts Pause & Ask and must stay mounted).
    */
   const showControls = useCallback(() => {
     setControlsVisible(true);
 
     if (hideControlsTimeoutRef.current) {
       clearTimeout(hideControlsTimeoutRef.current);
+      hideControlsTimeoutRef.current = null;
     }
-    hideControlsTimeoutRef.current = setTimeout(() => {
-      setControlsVisible(false);
-    }, 5000);
+    if (!pausedRef.current) {
+      hideControlsTimeoutRef.current = setTimeout(() => {
+        setControlsVisible(false);
+      }, 5000);
+    }
   }, []);
 
   /**
@@ -122,9 +140,11 @@ export default function PlayerScreen() {
         if (videoHandlerRef.current.isPaused()) {
           videoHandlerRef.current.play();
           setPaused(false);
+          pausedRef.current = false;
         } else {
           videoHandlerRef.current.pause();
           setPaused(true);
+          pausedRef.current = true;
         }
         showControls();
       } catch (e) {
