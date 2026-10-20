@@ -1,7 +1,7 @@
 import { StyleSheet, View, Image, Text } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { DrawerActions, useIsFocused } from '@react-navigation/native';
 import { useMenuContext } from '../components/MenuContext';
 import {
@@ -16,7 +16,7 @@ import {
 import { Direction } from '@bam.tech/lrud';
 import { scaledPixels } from '../hooks/useScale';
 import { RootStackParamList } from '../navigation/types';
-import { fetchMoviesData, CardData, amarGaathaCards } from '../data/moviesData';
+import { CardData, amarGaathaCards } from '../data/moviesData';
 import { colors, safeZones } from '../theme';
 import PlatformLinearGradient from '../components/PlatformLinearGradient';
 import { getOpenDrawerDirection } from '../utils/rtl';
@@ -54,32 +54,11 @@ export default function HomeScreen() {
   const navigation = useNavigation<HomeScreenNavigationProp>();
   const { isOpen: isMenuOpen, toggleMenu } = useMenuContext();
   const trendingRef = useRef<SpatialNavigationVirtualizedListRef>(null);
-  const classicsRef = useRef<SpatialNavigationVirtualizedListRef>(null);
-  const hipAndModernRef = useRef<SpatialNavigationVirtualizedListRef>(null);
   const [focusedIndex, setFocusedIndex] = useState(0);
-  const [moviesData, setMoviesData] = useState<CardData[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  // C024: home shows owned rows only. No remote template feed.
+  const [moviesData] = useState<CardData[]>(() => amarGaathaCards('sharad-purnima'));
   const isFocused = useIsFocused();
   const isActive = isFocused && !isMenuOpen;
-
-  // Fetch movies from catalog on mount
-  useEffect(() => {
-    const loadMovies = async () => {
-      try {
-        setIsLoading(true);
-        const movies = await fetchMoviesData();
-        console.log('Fetched movies:', movies.length);
-        // Amar Gaatha TV (C024): owned stories lead the catalog.
-        setMoviesData([...amarGaathaCards('sharad-purnima'), ...movies]);
-      } catch (error) {
-        console.error('Failed to load movies:', error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadMovies();
-  }, []);
 
   const focusedItem = useMemo(() => moviesData[focusedIndex] || null, [focusedIndex, moviesData]);
 
@@ -177,12 +156,12 @@ export default function HomeScreen() {
     [moviesData, renderItem],
   );
 
-  // Show loading state while fetching data
-  if (isLoading || moviesData.length === 0) {
+  // Show an empty state if the owned catalog has no items
+  if (moviesData.length === 0) {
     return (
       <View style={gridStyles.container}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <Text style={{ color: colors.text, fontSize: scaledPixels(24) }}>Loading movies...</Text>
+          <Text style={{ color: colors.text, fontSize: scaledPixels(24) }}>No movies available.</Text>
         </View>
       </View>
     );
@@ -194,9 +173,6 @@ export default function HomeScreen() {
         {renderHeader()}
         <SpatialNavigationScrollView offsetFromStart={scaledPixels(60)} style={gridStyles.scrollContent}>
           {renderScrollableRow('For Sharad Purnima: Kids Devotion', trendingRef, amarGaathaCards('sharad-purnima'))}
-          {renderScrollableRow('Trending Movies', trendingRef)}
-          {renderScrollableRow('Classics', classicsRef)}
-          {renderScrollableRow('Hip and Modern', hipAndModernRef)}
         </SpatialNavigationScrollView>
       </View>
     </SpatialNavigationRoot>
