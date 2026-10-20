@@ -102,15 +102,15 @@ export default function DetailsScreen() {
             <View style={detailsStyles.crewContainer}>
               <View style={detailsStyles.crewMember}>
                 <Text style={detailsStyles.crewRole}>Director</Text>
-                <Text style={detailsStyles.crewName}>Chris Traganos</Text>
+                <Text style={detailsStyles.crewName}>Ratnesh Saxena</Text>
               </View>
               <View style={detailsStyles.crewMember}>
                 <Text style={detailsStyles.crewRole}>Executive Producer</Text>
-                <Text style={detailsStyles.crewName}>Gio Laquidara</Text>
+                <Text style={detailsStyles.crewName}>SaxenaWave</Text>
               </View>
               <View style={detailsStyles.crewMember}>
                 <Text style={detailsStyles.crewRole}>Star</Text>
-                <Text style={detailsStyles.crewName}>Eric Fahsl</Text>
+                <Text style={detailsStyles.crewName}>Kids Devotion TV</Text>
               </View>
             </View>
             <DefaultFocus>
