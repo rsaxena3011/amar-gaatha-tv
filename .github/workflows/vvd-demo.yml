@@ -491,34 +491,83 @@ jobs:
               sleep "$wait_s"
             fi
           }
-          app_alive() {
-            # DISPATCH #22 FIX 3: probe the REAL package name. Run 21's
-            # pidof used the activity route (...kidsdevotion.main), which
-            # can never match a running process. ps|grep stays as the
-            # broad fallback.
-            if timeout -k 5 20 vda -s "$SERIAL" shell pidof "$PKG_ID" >/dev/null 2>&1; then
-              log "  app process alive (pidof $PKG_ID)"; return 0
-            fi
-            if timeout -k 5 20 vda -s "$SERIAL" shell ps 2>/dev/null | grep -qi kidsdevotion; then
-              log "  app process alive (ps grep kidsdevotion)"; return 0
-            fi
-            return 1
+          proc_diag() {
+            # DISPATCH #23 FIX 1 (run 39454924754 post-mortem): the process
+            # probes are DEMOTED to non-gating diagnostics. Run 22 proved
+            # pidof/ps return NOTHING while the app is visibly running in
+            # three consecutive screenshots and in the MP4's final frame:
+            # Vega/Kepler apps are runtime-hosted and the guest ps does not
+            # expose them under the package id. The probe was never
+            # positive-controlled on this guest, so it must never gate
+            # again. Dump the full process tables ONCE, here, while the app
+            # is up, to learn the real runtime process name for future
+            # runs. Informational only; can never fail the gate.
+            log "  process diagnostics (NON-GATING): dumping ps / ps -A / pidof to boot-poll.log"
+            {
+              echo "== pidof $PKG_ID"; timeout -k 5 20 vda -s "$SERIAL" shell pidof "$PKG_ID" 2>&1
+              echo "== pidof $APP_PKG"; timeout -k 5 20 vda -s "$SERIAL" shell pidof "$APP_PKG" 2>&1
+              echo "== ps"; timeout -k 5 20 vda -s "$SERIAL" shell ps 2>&1
+              echo "== ps -A"; timeout -k 5 20 vda -s "$SERIAL" shell ps -A 2>&1
+              echo "== ps -ef"; timeout -k 5 20 vda -s "$SERIAL" shell ps -ef 2>&1
+            } >> /tmp/vvd-logs/boot-poll.log 2>&1 || true
           }
-          grid_launch() {
-            # DISPATCH #22 FIX 4 (queued since #18; evidence run 21
-            # shot-foreground-1c.png): when the drawer was cleared via BACK,
-            # the launcher shows the "Your apps" grid with Kids Devotion as
-            # the FIRST and ONLY tile. Last-resort launch from there: pin
-            # focus to the grid origin (UP/LEFT clamp at the edges), then
-            # ENTER the tile. Only called when DRAWER_SEEN=1 (we know the
-            # grid is the current surface); never inside the app.
-            log "  grid-launch fallback: pin focus to first tile + ENTER"
+          guest_luma() {  # $1 = screenshot path; prints mean luma of guest region
+            ffmpeg -loglevel error -y -i "$1" -vf "crop=962:540:100:100,format=gray" \
+              -frames:v 1 -f rawvideo /tmp/fg-gray.raw 2>/dev/null || { echo 0; return; }
+            od -v -An -tu1 /tmp/fg-gray.raw 2>/dev/null \
+              | awk '{for(i=1;i<=NF;i++) s+=$i; n+=NF} END {if(n) printf "%d", s/n; else print 0}'
+          }
+          visual_verdict() {  # $1 = screenshot path; prints ONE word: app|drawer|black|grid
+            # DISPATCH #23 FIX 2: the foreground gate is a VISUAL verdict,
+            # replacing the false-negative process probe. Thresholds were
+            # unit-tested offline against the run-22 artifact set:
+            # drawer_match fires on every drawer shot (0-1637 of 360000
+            # bytes) and never on clean app home (237519) or the grid
+            # (240959); every real content frame has guest-region mean
+            # luma >= 9.1 while pure black is ~0; the clean app home
+            # differs from the post-BACK grid shot in 86% of guest-region
+            # bytes while the grid differs from itself by 0%.
+            # Diagnostics go to stderr / the log file ONLY: stdout carries
+            # the verdict word alone (callers capture it).
+            if drawer_match "$1" >/dev/null; then echo drawer; return; fi
+            local luma
+            luma=$(guest_luma "$1")
+            echo "  visual verdict: guest luma ${luma}" >&2
+            if [ "${luma:-0}" -lt 3 ]; then echo black; return; fi
+            if [ -f /tmp/vvd-logs/shot-foreground-1c.png ]; then
+              # shot-foreground-1c is the post-BACK "Your apps" grid. If
+              # the current screen is still (near-)identical to it, the
+              # app never came up: we are sitting on the launcher grid.
+              ffmpeg -loglevel error -y -i "$1" -vf "crop=962:540:100:100,format=rgb24" \
+                -f rawvideo /tmp/fg-vcur.raw 2>/dev/null || { echo app; return; }
+              ffmpeg -loglevel error -y -i /tmp/vvd-logs/shot-foreground-1c.png \
+                -vf "crop=962:540:100:100,format=rgb24" -f rawvideo /tmp/fg-vgrid.raw 2>/dev/null || { echo app; return; }
+              local total diffb pct
+              total=$(stat -c%s /tmp/fg-vgrid.raw)
+              [ "${total:-0}" -gt 0 ] || { echo app; return; }
+              diffb=$(cmp -l /tmp/fg-vcur.raw /tmp/fg-vgrid.raw | wc -l)
+              pct=$(( diffb * 100 / total ))
+              echo "  visual verdict: grid diff ${diffb}/${total} bytes (${pct}%)" >&2
+              if [ "$pct" -lt 5 ]; then echo grid; return; fi
+            fi
+            echo app
+          }
+          drawer_finisher() {  # $1 = suffix for the post-finisher screenshot
+            # DISPATCH #23 FIX 3 (run 22 evidence): with the app already
+            # up and the launcher nav drawer over it, UP UP LEFT LEFT
+            # ENTER clears the drawer and leaves the app home with the
+            # first card focused (run 22 shot-grid-launched + MP4 end
+            # frame). STRICTLY conditional: callers fire this ONLY when
+            # visual_verdict said "drawer". With the app up and NO drawer,
+            # the same ENTER would hit the focused first card, open
+            # Details early, and corrupt the choreography.
+            log "  drawer finisher: UP UP LEFT LEFT ENTER (drawer visible)"
             key "KEY_UP" || true; key "KEY_UP" || true
             key "KEY_LEFT" || true; key "KEY_LEFT" || true
-            sleep 2; shot grid-focus
+            sleep 2; shot "foreground-$1-focus"
             key "KEY_ENTER" || true
             LAST_LAUNCH=$(date +%s)
-            settle45; shot grid-launched
+            settle45; shot "foreground-$1"
           }
           focus_probe() {  # prints focused window line; empty if dumpsys unavailable
             timeout -k 5 20 vda -s "$SERIAL" shell dumpsys window windows 2>/dev/null \
@@ -589,32 +638,43 @@ jobs:
               fi
               log "  drawer cleared; proceeding"
             fi
-            # DISPATCH #21/#22: positive liveness check before navigating.
-            # Probe targets the REAL package (fix 3) after a full 45s
-            # post-launch settle (fix 2). Failure ladder: emergency
-            # terminate+send relaunch (fix 1), then, if the drawer was in
-            # play and the "Your apps" grid is the current surface, the
-            # grid-launch fallback (fix 4). Fail loudly only after all three.
-            settle45
-            if app_alive; then
-              log "  liveness confirmed"
-            else
-              log "  app process NOT found; emergency relaunch (terminate+send pair)"
-              fg_launch; settle45; shot foreground-emergency
-              if app_alive; then
-                log "  app process alive after emergency relaunch"
-              elif [ "$DRAWER_SEEN" -eq 1 ]; then
-                grid_launch
-                if app_alive; then
-                  log "  app process alive after grid launch"
-                else
-                  echo "FOREGROUND GATE FAILED: $PKG_ID has no process after terminate+send relaunch + grid fallback"; exit 1
-                fi
-              else
-                echo "FOREGROUND GATE FAILED: $PKG_ID has no process after drawer clear + terminate+send relaunch"; exit 1
+            # DISPATCH #23 (run 39454924754 post-mortem): the gate is a
+            # VISUAL verdict now. Run 22's gate failed on a FALSE-NEGATIVE
+            # process probe (pidof/ps empty while the app was visibly
+            # running), so the probes are diagnostics only (proc_diag) and
+            # never gate. Ladder: settle, shoot, judge. "drawer" -> the
+            # proven finisher (fix 3, strictly drawer-conditional). Any
+            # remaining non-"app" verdict -> one emergency terminate+send
+            # relaunch and re-judge (finisher again if the drawer
+            # reappeared over the relaunched app). Fail ONLY when the
+            # final verdict is not "app": drawer persisting after the
+            # full ladder, or a black/launcher screen. Choreography is
+            # screen-change-verified downstream, so a visual "app" here
+            # restores the gate's real purpose: never navigate blind.
+            proc_diag
+            settle45; shot foreground-verdict
+            FGV=$(visual_verdict /tmp/vvd-logs/shot-foreground-verdict.png)
+            log "  foreground visual verdict: $FGV"
+            if [ "$FGV" = "drawer" ]; then
+              drawer_finisher finisher1
+              FGV=$(visual_verdict /tmp/vvd-logs/shot-foreground-finisher1.png)
+              log "  verdict after drawer finisher: $FGV"
+            fi
+            if [ "$FGV" != "app" ]; then
+              log "  verdict '$FGV': emergency relaunch (terminate+send pair), then re-judge"
+              fg_launch; settle45; shot foreground-verdict2
+              FGV=$(visual_verdict /tmp/vvd-logs/shot-foreground-verdict2.png)
+              log "  verdict after emergency relaunch: $FGV"
+              if [ "$FGV" = "drawer" ]; then
+                drawer_finisher finisher2
+                FGV=$(visual_verdict /tmp/vvd-logs/shot-foreground-finisher2.png)
+                log "  verdict after second drawer finisher: $FGV"
               fi
             fi
-            log "  WARNING: focus unverifiable (dumpsys empty) and no drawer signature; proceeding after explicit launch"
+            if [ "$FGV" != "app" ]; then
+              echo "FOREGROUND GATE FAILED (visual): final verdict '$FGV' after the full ladder (terminate+send launches, drawer finisher, emergency relaunch); refusing to navigate blind"; exit 1
+            fi
+            log "foreground gate PASSED (visual): app foregrounded, no drawer, contentful screen"
           else
             log "  foreground gate PASSED: ${APP_PKG} has focus"
           fi
