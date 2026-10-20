@@ -443,6 +443,33 @@ jobs:
             log "RAW FALLBACK install+launch SUCCEEDED"
           fi
 
+          # --- DISPATCH #27 (boss decision 2026-10-20: hunt the app-side
+          # post-answer exit in the app, not the edit): DIAGNOSTIC ONLY.
+          # Runs 25+26 proved the app exits Player->Details ~0.5s after
+          # the answer card renders, on BOTH input paths (inputd ENTER
+          # and host-side remote-OK click), with the navigateBack
+          # signature (video elements destroyed, goBack ~300ms later).
+          # Static hunt closed the caller set in PlayerScreen.vega.tsx:
+          # navigateBack is reachable ONLY from (a) the Back key case,
+          # (b) BackHandler hardwareBackPress, (c) the isVideoEnded
+          # effect (VideoHandler.onEnded, W3C 'ended'), (d) the Exit
+          # chip onSelect. Every path console.logs with a distinct tag
+          # ('[Kepler] Key pressed: Back', '[VideoHandler] - onEnded',
+          # '[PlayerScreen.kepler] - Navigating back', '- Cleaning up
+          # video handler'), but NO guest/app log has ever been captured
+          # (diagnostics only collected host + CLI logs). Start live
+          # guest-log tails NOW (background, ffmpeg pattern, self-
+          # terminating) so the answer moment is captured whichever
+          # logger the guest actually uses; post-hoc dumps are added in
+          # Collect diagnostics as the ring-buffer fallback. The
+          # choreography below is byte-identical to run 26.
+          log "dispatch #27: starting guest log tails (diagnostic)"
+          timeout -k 5 1500 vda -s "$SERIAL" shell journalctl -f --no-pager -o short-precise \
+            > /tmp/vvd-logs/guest-journal-live.log 2>&1 &
+          timeout -k 5 1500 vda -s "$SERIAL" shell logcat -v time \
+            > /tmp/vvd-logs/guest-logcat-live.log 2>&1 &
+          log "guest clock at tail start: $(timeout -k 5 15 vda -s "$SERIAL" shell date 2>/dev/null || echo unavailable)"
+
           # --- FOREGROUND GATE (run 38956789191 post-mortem): vega run-app
           # can install the app without ever bringing it to the foreground.
           # In run 15 the Fire TV launcher profile drawer ("Pioneer Tom")
@@ -934,6 +961,9 @@ jobs:
             done
             return 1
           }
+          # DISPATCH #27: guest-clock marker so the journal lines around
+          # the answer ENTER can be aligned with this step's host log.
+          log "guest clock before answer ENTER: $(timeout -k 5 15 vda -s "$SERIAL" shell date 2>/dev/null || echo unavailable)"
           key KEY_DOWN;      sleep 2    # focus question chip 1
           log "answer ENTER via remote-OK click (single delivery): xdotool click (1156,282)"
           xdotool mousemove 1156 282 click 1 2>/dev/null || true
@@ -988,6 +1018,21 @@ jobs:
           if [ -n "${SERIAL:-}" ]; then
             timeout -k 5 30 vda -s "$SERIAL" shell gwsi-tool-screenshooter /tmp/vvd-shot.png \
               && timeout -k 5 30 vda -s "$SERIAL" pull /tmp/vvd-shot.png "$D/shot-guest.png"
+          fi
+          # DISPATCH #27: post-hoc guest log dumps (ring-buffer fallback
+          # for the live tails started in the choreography step). The
+          # app console lines around the post-answer exit are the
+          # evidence: '[Kepler] Key pressed: Back' (back event),
+          # '[VideoHandler] - onEnded' (spurious ended), bare
+          # '[PlayerScreen.kepler] - Navigating back' (Exit select),
+          # '- Cleaning up video handler' alone (plain goBack).
+          if [ -n "${SERIAL:-}" ]; then
+            timeout -k 5 60 vda -s "$SERIAL" shell journalctl --no-pager -o short-precise -n 8000 \
+              > "$D/guest-journal-dump.log" 2>&1 || true
+            timeout -k 5 60 vda -s "$SERIAL" shell logcat -d -v time \
+              > "$D/guest-logcat-dump.log" 2>&1 || true
+            timeout -k 5 30 vda -s "$SERIAL" shell "ls -la /var/log/ 2>/dev/null; echo ---; tail -n 500 /var/log/messages 2>/dev/null; echo ---; dmesg 2>/dev/null | tail -n 200" \
+              > "$D/guest-syslog-dump.txt" 2>&1 || true
           fi
           true
 
